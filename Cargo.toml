@@ -1,0 +1,14 @@
+[package]
+name = "vcf-reformatter"
+version = "0.1.0"
+edition = "2024"
+description = "Fast VCF file parser and reformatter with VEP annotation support"
+authors = ["Flavio Lombardo <fl@flaviolombardo.site>"]
+license = "MIT"
+repository = "https://github.com/flalom/vcf-reformatter"
+keywords = ["bioinformatics", "vcf", "genomics", "vep", "rust"]
+categories = ["science", "command-line-utilities"]
+
+[dependencies]
+flate2 = "1.1.2"
+regex = "*"
