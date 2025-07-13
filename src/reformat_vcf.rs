@@ -1,8 +1,19 @@
-
 use std::collections::HashMap;
-use regex::Regex;
-use crate::extract_sample_info::{parse_format_and_samples, ParsedFormatSample};
+use std::io::{Write, BufWriter};
+use std::fs::{File, create_dir_all};
+use std::path::Path;
+use rayon::prelude::*;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use crate::get_info_from_header::extract_csq_format_from_header;
+use crate::extract_sample_info::{parse_format_and_samples, ParsedFormatSample};
+
+#[derive(Debug, Clone, Copy)]
+pub enum TranscriptHandling {
+    MostSevere,
+    FirstOnly,
+    SplitRows,
+}
 
 #[derive(Debug, Clone)]
 pub struct ReformattedVcfRecord {
@@ -18,14 +29,19 @@ pub struct ReformattedVcfRecord {
 }
 
 impl ReformattedVcfRecord {
-    pub fn from_vcf_line(line: &str, column_names: &[&str], csq_field_names: &Option<Vec<String>>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_vcf_line(
+        line: &str,
+        column_names: &[&str],
+        csq_field_names: &Option<Vec<String>>,
+        transcript_handling: TranscriptHandling
+    ) -> std::result::Result<Vec<Self>, Box<dyn std::error::Error>> {
         let fields: Vec<&str> = line.split('\t').collect();
 
         if fields.len() < 8 {
             return Err("VCF line has too few fields".into());
         }
 
-        // Parse standard VCF fields
+        // Parse basic VCF fields
         let chromosome = fields[0].to_string();
         let position = fields[1].parse::<u64>()?;
         let id = if fields[2] == "." { None } else { Some(fields[2].to_string()) };
@@ -33,28 +49,34 @@ impl ReformattedVcfRecord {
         let alternate = fields[4].to_string();
         let quality = if fields[5] == "." { None } else { Some(fields[5].parse::<f64>()?) };
         let filter = fields[6].to_string();
+        let info = fields[7].to_string();
 
-        // Parse INFO field into individual key-value pairs
-        let info_fields = parse_info_field(fields[7], csq_field_names)?;
+        // Parse INFO field and handle CSQ
+        let info_variants = parse_info_field(&info, csq_field_names, transcript_handling)?;
 
-        // Parse FORMAT and sample fields if they exist
-        let format_sample_data = if fields.len() > 8 {
-            let format_field = if fields.len() > 8 { Some(fields[8]) } else { None };
-            let sample_fields: Vec<String> = if fields.len() > 9 {
-                fields[9..].iter().map(|s| s.to_string()).collect()
-            } else {
-                Vec::new()
-            };
+        // Parse FORMAT and sample data
+        let format_field = if fields.len() > 8 && !fields[8].is_empty() && fields[8] != "." {
+            Some(fields[8])
+        } else {
+            None
+        };
 
-            // Extract sample names from column headers
-            let sample_names: Vec<String> = if column_names.len() > 9 {
-                column_names[9..].iter().map(|s| s.to_string()).collect()
-            } else {
-                (0..sample_fields.len()).map(|i| format!("SAMPLE_{}", i + 1)).collect()
-            };
+        let sample_fields: Vec<String> = if fields.len() > 9 {
+            fields[9..].iter().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        };
 
-            if format_field.is_some() && !sample_fields.is_empty() {
-                Some(parse_format_and_samples(format_field, &sample_fields, &sample_names)?)
+        let sample_names: Vec<String> = if column_names.len() > 9 {
+            column_names[9..].iter().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        };
+
+        // Only parse sample data if we have both format field and sample data
+        let format_sample_data = if let Some(format_str) = format_field {
+            if !sample_fields.is_empty() && !sample_names.is_empty() {
+                Some(parse_format_and_samples(Some(format_str), &sample_fields, &sample_names)?)
             } else {
                 None
             }
@@ -62,289 +84,411 @@ impl ReformattedVcfRecord {
             None
         };
 
-        Ok(ReformattedVcfRecord {
-            chromosome,
-            position,
-            id,
-            reference,
-            alternate,
-            quality,
-            filter,
-            info_fields,
-            format_sample_data,
-        })
+        // Create records for each info variant (handling multiple transcripts)
+        let mut records = Vec::new();
+        for info_fields in info_variants {
+            records.push(ReformattedVcfRecord {
+                chromosome: chromosome.clone(),
+                position,
+                id: id.clone(),
+                reference: reference.clone(),
+                alternate: alternate.clone(),
+                quality,
+                filter: filter.clone(),
+                info_fields,
+                format_sample_data: format_sample_data.clone(),
+            });
+        }
+
+        Ok(records)
     }
 }
 
-fn parse_info_field(info: &str, csq_field_names: &Option<Vec<String>>) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+
+fn parse_info_field(
+    info: &str,
+    csq_field_names: &Option<Vec<String>>,
+    transcript_handling: TranscriptHandling
+) -> std::result::Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
     let mut info_map = HashMap::new();
+    let mut csq_value = None;
 
-    if info == "." {
-        return Ok(info_map);
-    }
-
-    // Split by semicolon to get individual INFO entries
-    let entries: Vec<&str> = info.split(';').collect();
-
-    for entry in entries {
-        if entry.is_empty() {
+    // Split the INFO field by semicolon and collect all fields
+    for pair in info.split(';') {
+        if pair.is_empty() {
             continue;
         }
 
-        // Check if entry contains '=' (key=value format)
-        if let Some(eq_pos) = entry.find('=') {
-            let key = entry[..eq_pos].to_string();
-            let value = entry[eq_pos + 1..].to_string();
+        if let Some(eq_pos) = pair.find('=') {
+            let key = pair[..eq_pos].to_string();
+            let value = pair[eq_pos + 1..].to_string();
 
-            // Special handling for CSQ field
-            if key == "CSQ" && csq_field_names.is_some() {
-                let csq_fields = parse_csq_field(&value, csq_field_names.as_ref().unwrap())?;
-                for (csq_key, csq_value) in csq_fields {
-                    info_map.insert(format!("CSQ_{}", csq_key), csq_value);
-                }
+            // Store CSQ separately for special handling
+            if key == "CSQ" {
+                csq_value = Some(value);
             } else {
-                info_map.insert(key, value);
+                info_map.insert(format!("INFO_{}", key), value);
             }
         } else {
-            // Flag fields (no value, just presence indicates true)
-            info_map.insert(entry.to_string(), "true".to_string());
+            // Flag without value
+            info_map.insert(format!("INFO_{}", pair), "true".to_string());
         }
     }
 
-    Ok(info_map)
+    // Handle CSQ field if present
+    if let Some(csq_val) = csq_value {
+        if let Some(csq_names) = csq_field_names {
+            let csq_variants = parse_csq_field_with_handling(&csq_val, csq_names, transcript_handling)?;
+            
+            // Combine INFO fields with CSQ fields for each variant
+            let mut results = Vec::new();
+            for csq_map in csq_variants {
+                let mut combined_map = info_map.clone();
+                combined_map.extend(csq_map);
+                results.push(combined_map);
+            }
+            return Ok(results);
+        }
+    }
+
+    // If no CSQ processing was done, return a single variant
+    Ok(vec![info_map])
 }
 
-fn parse_csq_field(csq_value: &str, csq_field_names: &[String]) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-    let mut csq_map = HashMap::new();
-
-    // Split CSQ value by comma to get individual annotations (multiple transcripts)
+fn parse_csq_field_with_handling(
+    csq_value: &str,
+    csq_field_names: &[String],
+    transcript_handling: TranscriptHandling
+) -> std::result::Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
     let annotations: Vec<&str> = csq_value.split(',').collect();
 
-    // Process the first annotation (can be extended to handle multiple)
-    if let Some(first_annotation) = annotations.first() {
-        let csq_values: Vec<&str> = first_annotation.split('|').collect();
-
-        // Map each CSQ field name to its corresponding value
-        for (i, field_name) in csq_field_names.iter().enumerate() {
-            let value = csq_values.get(i).unwrap_or(&"").to_string();
-            // Use "." for empty values to be consistent with VCF format
-            let final_value = if value.is_empty() { ".".to_string() } else { value };
-            csq_map.insert(field_name.clone(), final_value);
+    match transcript_handling {
+        TranscriptHandling::MostSevere => {
+            let most_severe = find_most_severe_consequence(&annotations, csq_field_names)?;
+            Ok(vec![most_severe])
         }
-
-        // If there are multiple annotations, we could also add a count field
-        if annotations.len() > 1 {
-            csq_map.insert("ANNOTATION_COUNT".to_string(), annotations.len().to_string());
+        TranscriptHandling::FirstOnly => {
+            if let Some(first_annotation) = annotations.first() {
+                let parsed = parse_single_csq_annotation(first_annotation, csq_field_names)?;
+                Ok(vec![parsed])
+            } else {
+                Ok(vec![HashMap::new()])
+            }
         }
+        TranscriptHandling::SplitRows => {
+            let mut results = Vec::new();
+            for annotation in annotations {
+                let parsed = parse_single_csq_annotation(annotation, csq_field_names)?;
+                results.push(parsed);
+            }
+            Ok(results)
+        }
+    }
+}
+
+fn parse_single_csq_annotation(
+    annotation: &str,
+    csq_field_names: &[String]
+) -> std::result::Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    let mut csq_map = HashMap::new();
+    let values: Vec<&str> = annotation.split('|').collect();
+
+    for (i, field_name) in csq_field_names.iter().enumerate() {
+        let value = values.get(i).unwrap_or(&"").to_string();
+        csq_map.insert(format!("CSQ_{}", field_name), value);
     }
 
     Ok(csq_map)
 }
 
-pub fn reformat_vcf_data(column_names: &str, data_lines: &[String]) -> Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
-    let column_names_vec: Vec<&str> = column_names.trim_start_matches('#').split('\t').collect();
-    let mut reformatted_records = Vec::new();
-    let mut all_info_keys = std::collections::HashSet::new();
-    let mut all_format_keys = std::collections::HashSet::new();
-    let mut sample_names = std::collections::HashSet::new();
-
-    // For now, we'll need to get header from somewhere - this will need to be passed in
-    // This is a temporary solution - header should be passed as parameter
-    let csq_field_names: Option<Vec<String>> = None; // Will be populated from header
-
-    // First pass: collect all unique INFO field keys and FORMAT keys
-    for line in data_lines {
-        let record = ReformattedVcfRecord::from_vcf_line(line, &column_names_vec, &csq_field_names)?;
-
-        // Collect INFO keys
-        for key in record.info_fields.keys() {
-            all_info_keys.insert(key.clone());
-        }
-
-        // Collect FORMAT keys and sample names
-        if let Some(ref format_sample) = record.format_sample_data {
-            for key in format_sample.get_all_format_keys() {
-                all_format_keys.insert(key);
-            }
-            for name in format_sample.get_sample_names() {
-                sample_names.insert(name);
-            }
-        }
-
-        reformatted_records.push(record);
+fn find_most_severe_consequence(
+    annotations: &[&str],
+    csq_field_names: &[String]
+) -> std::result::Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    if annotations.is_empty() {
+        return Ok(HashMap::new());
     }
 
-    // Create new column headers
-    let mut new_headers = vec![
-        "CHROM".to_string(),
-        "POS".to_string(),
-        "ID".to_string(),
-        "REF".to_string(),
-        "ALT".to_string(),
-        "QUAL".to_string(),
-        "FILTER".to_string(),
+    // VEP consequence severity ranking (most severe first)
+    let severity_order = vec![
+        "transcript_ablation",
+        "splice_acceptor_variant",
+        "splice_donor_variant",
+        "stop_gained",
+        "frameshift_variant",
+        "stop_lost",
+        "start_lost",
+        "transcript_amplification",
+        "inframe_insertion",
+        "inframe_deletion",
+        "missense_variant",
+        "protein_altering_variant",
+        "splice_region_variant",
+        "incomplete_terminal_codon_variant",
+        "start_retained_variant",
+        "stop_retained_variant",
+        "synonymous_variant",
+        "coding_sequence_variant",
+        "mature_miRNA_variant",
+        "5_prime_UTR_variant",
+        "3_prime_UTR_variant",
+        "non_coding_transcript_exon_variant",
+        "intron_variant",
+        "NMD_transcript_variant",
+        "non_coding_transcript_variant",
+        "upstream_gene_variant",
+        "downstream_gene_variant",
+        "TFBS_ablation",
+        "TFBS_amplification",
+        "TF_binding_site_variant",
+        "regulatory_region_ablation",
+        "regulatory_region_amplification",
+        "feature_elongation",
+        "regulatory_region_variant",
+        "feature_truncation",
+        "intergenic_variant",
     ];
 
-    // Add sorted INFO field keys as separate columns
-    let mut sorted_info_keys: Vec<String> = all_info_keys.into_iter().collect();
-    sorted_info_keys.sort();
+    let mut most_severe_annotation = annotations[0];
+    let mut best_severity = usize::MAX;
 
-    for key in &sorted_info_keys {
-        new_headers.push(format!("INFO_{}", key));
-    }
+    // Find consequence column index
+    let consequence_index = csq_field_names.iter()
+        .position(|name| name == "Consequence")
+        .unwrap_or(0);
 
-    // Add FORMAT/sample columns if they exist
-    if !all_format_keys.is_empty() {
-        let mut sorted_format_keys: Vec<String> = all_format_keys.into_iter().collect();
-        sorted_format_keys.sort();
+    for annotation in annotations {
+        let values: Vec<&str> = annotation.split('|').collect();
+        if let Some(consequence) = values.get(consequence_index) {
+            // Handle multiple consequences separated by &
+            let consequences: Vec<&str> = consequence.split('&').collect();
 
-        let mut sorted_sample_names: Vec<String> = sample_names.into_iter().collect();
-        sorted_sample_names.sort();
-
-        for sample_name in &sorted_sample_names {
-            for format_key in &sorted_format_keys {
-                new_headers.push(format!("{}_{}", sample_name, format_key));
-            }
-        }
-    }
-
-    Ok((new_headers, reformatted_records))
-}
-
-// Updated function signature to accept header
-pub fn reformat_vcf_data_with_header(header: &str, column_names: &str, data_lines: &[String]) -> Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
-    let column_names_vec: Vec<&str> = column_names.trim_start_matches('#').split('\t').collect();
-    let mut reformatted_records = Vec::new();
-    let mut all_info_keys = std::collections::HashSet::new();
-    let mut all_format_keys = std::collections::HashSet::new();
-    let mut sample_names = std::collections::HashSet::new();
-
-    // Extract CSQ field names from header
-    let csq_field_names = extract_csq_format_from_header(header);
-
-    // First pass: collect all unique INFO field keys and FORMAT keys
-    for line in data_lines {
-        let record = ReformattedVcfRecord::from_vcf_line(line, &column_names_vec, &csq_field_names)?;
-
-        // Collect INFO keys
-        for key in record.info_fields.keys() {
-            all_info_keys.insert(key.clone());
-        }
-
-        // Collect FORMAT keys and sample names
-        if let Some(ref format_sample) = record.format_sample_data {
-            for key in format_sample.get_all_format_keys() {
-                all_format_keys.insert(key);
-            }
-            for name in format_sample.get_sample_names() {
-                sample_names.insert(name);
-            }
-        }
-
-        reformatted_records.push(record);
-    }
-
-    // Create new column headers
-    let mut new_headers = vec![
-        "CHROM".to_string(),
-        "POS".to_string(),
-        "ID".to_string(),
-        "REF".to_string(),
-        "ALT".to_string(),
-        "QUAL".to_string(),
-        "FILTER".to_string(),
-    ];
-
-    // Add sorted INFO field keys as separate columns
-    let mut sorted_info_keys: Vec<String> = all_info_keys.into_iter().collect();
-    sorted_info_keys.sort();
-
-    for key in &sorted_info_keys {
-        new_headers.push(format!("INFO_{}", key));
-    }
-
-    // Add FORMAT/sample columns if they exist
-    if !all_format_keys.is_empty() {
-        let mut sorted_format_keys: Vec<String> = all_format_keys.into_iter().collect();
-        sorted_format_keys.sort();
-
-        let mut sorted_sample_names: Vec<String> = sample_names.into_iter().collect();
-        sorted_sample_names.sort();
-
-        for sample_name in &sorted_sample_names {
-            for format_key in &sorted_format_keys {
-                new_headers.push(format!("{}_{}", sample_name, format_key));
-            }
-        }
-    }
-
-    Ok((new_headers, reformatted_records))
-}
-
-pub fn write_reformatted_vcf(filename: &str, headers: &[String], records: &[ReformattedVcfRecord]) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
-    use std::fs::File;
-
-    let mut file = File::create(filename)?;
-
-    // Write headers
-    writeln!(file, "{}", headers.join("\t"))?;
-
-    // Get all INFO keys from headers (those that start with "INFO_")
-    let info_keys: Vec<String> = headers.iter()
-        .filter(|h| h.starts_with("INFO_"))
-        .map(|h| h[5..].to_string()) // Remove "INFO_" prefix
-        .collect();
-
-    // Get all sample format keys from headers (those that contain '_' but don't start with "INFO_")
-    let sample_format_headers: Vec<String> = headers.iter()
-        .filter(|h| h.contains('_') && !h.starts_with("INFO_"))
-        .map(|h| h.to_string())
-        .collect();
-
-    // Write data
-    for record in records {
-        let mut row = Vec::new();
-
-        // Standard VCF fields
-        row.push(record.chromosome.clone());
-        row.push(record.position.to_string());
-        row.push(record.id.as_ref().unwrap_or(&".".to_string()).clone());
-        row.push(record.reference.clone());
-        row.push(record.alternate.clone());
-        row.push(record.quality.map_or(".".to_string(), |q| q.to_string()));
-        row.push(record.filter.clone());
-
-        // INFO fields in the same order as headers
-        for key in &info_keys {
-            row.push(record.info_fields.get(key).unwrap_or(&".".to_string()).clone());
-        }
-
-        // Sample format fields
-        for header in &sample_format_headers {
-            let mut value = ".".to_string();
-
-            if let Some(ref format_sample) = record.format_sample_data {
-                // Parse header to get sample name and format key
-                if let Some(underscore_pos) = header.rfind('_') {
-                    let sample_name = &header[..underscore_pos];
-                    let format_key = &header[underscore_pos + 1..];
-
-                    // Find the sample and get the value
-                    for sample in &format_sample.samples {
-                        if sample.sample_name == sample_name {
-                            value = sample.format_fields.get(format_key).unwrap_or(&".".to_string()).clone();
-                            break;
-                        }
+            for cons in consequences {
+                if let Some(severity) = severity_order.iter().position(|&x| x == cons) {
+                    if severity < best_severity {
+                        best_severity = severity;
+                        most_severe_annotation = annotation;
                     }
                 }
             }
-
-            row.push(value);
         }
+    }
 
-        writeln!(file, "{}", row.join("\t"))?;
+    parse_single_csq_annotation(most_severe_annotation, csq_field_names)
+}
+
+pub fn reformat_vcf_data_with_header(
+    header: &str,
+    column_names: &str,
+    data_lines: &[String],
+    transcript_handling: TranscriptHandling,
+) -> std::result::Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
+    // Extract CSQ field names from the header
+    let csq_field_names = extract_csq_format_from_header(header);
+
+    // Parse column names
+    let columns: Vec<&str> = column_names.split('\t').collect();
+
+    // Extract sample names (columns after FORMAT)
+    let sample_names: Vec<String> = if columns.len() > 9 {
+        columns[9..].iter().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
+    // Process data lines
+    let mut records = Vec::new();
+    for line in data_lines {
+        let line_records = ReformattedVcfRecord::from_vcf_line(line, &columns, &csq_field_names, transcript_handling)?;
+        records.extend(line_records);
+    }
+
+    // Generate headers from the first record
+    let headers = if let Some(first_record) = records.first() {
+        generate_headers_from_record(first_record, &sample_names)
+    } else {
+        vec!["CHROM".to_string(), "POS".to_string(), "ID".to_string(),
+             "REF".to_string(), "ALT".to_string(), "QUAL".to_string(), "FILTER".to_string()]
+    };
+
+    Ok((headers, records))
+}
+
+pub fn reformat_vcf_data_with_header_parallel(
+    header: &str,
+    column_names: &str,
+    data_lines: &[String],
+    transcript_handling: TranscriptHandling,
+) -> std::result::Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
+    // Extract CSQ field names from the header
+    let csq_field_names = extract_csq_format_from_header(header);
+
+    // Parse column names
+    let columns: Vec<&str> = column_names.split('\t').collect();
+
+    // Extract sample names (columns after FORMAT)
+    let sample_names: Vec<String> = if columns.len() > 9 {
+        columns[9..].iter().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
+    // Process data lines in parallel
+    let results: std::result::Result<Vec<Vec<ReformattedVcfRecord>>, String> =
+        data_lines
+            .par_iter()
+            .map(|line| {
+                ReformattedVcfRecord::from_vcf_line(line, &columns, &csq_field_names, transcript_handling)
+                    .map_err(|e| format!("Error processing line: {}", e))
+            })
+            .collect();
+
+    let records: Vec<ReformattedVcfRecord> = results?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // Generate headers from the first record
+    let headers = if let Some(first_record) = records.first() {
+        generate_headers_from_record(first_record, &sample_names)
+    } else {
+        vec!["CHROM".to_string(), "POS".to_string(), "ID".to_string(),
+             "REF".to_string(), "ALT".to_string(), "QUAL".to_string(), "FILTER".to_string()]
+    };
+
+    Ok((headers, records))
+}
+
+fn generate_headers_from_record(record: &ReformattedVcfRecord, _sample_names: &[String]) -> Vec<String> {
+    let mut headers = vec![
+        "CHROM".to_string(),
+        "POS".to_string(),
+        "ID".to_string(),
+        "REF".to_string(),
+        "ALT".to_string(),
+        "QUAL".to_string(),
+        "FILTER".to_string(),
+    ];
+
+    // Add INFO field headers (sorted for consistency)
+    let mut info_keys: Vec<String> = record.info_fields.keys()
+        .filter(|k| k.starts_with("INFO_"))
+        .cloned()
+        .collect();
+    info_keys.sort();
+    headers.extend(info_keys);
+
+    // Add CSQ field headers (sorted for consistency)
+    let mut csq_keys: Vec<String> = record.info_fields.keys()
+        .filter(|k| k.starts_with("CSQ_"))
+        .cloned()
+        .collect();
+    csq_keys.sort();
+    headers.extend(csq_keys);
+
+    // Add sample headers
+    if let Some(ref sample_data) = record.format_sample_data {
+        headers.extend(sample_data.get_headers_for_samples());
+    }
+
+    headers
+}
+
+pub fn write_reformatted_vcf(
+    filename: &str,
+    headers: &[String],
+    records: &[ReformattedVcfRecord],
+    compress: bool,
+) -> std::io::Result<()> {
+    // Create the directory structure if it doesn't exist
+    if let Some(parent) = Path::new(filename).parent() {
+        create_dir_all(parent)?;
+    }
+
+    let file = File::create(filename)?;
+
+    if compress {
+        // Use gzip compression
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut writer = BufWriter::new(encoder);
+        write_tsv_content(&mut writer, headers, records)?;
+        writer.flush()?;
+    } else {
+        // Write uncompressed
+        let mut writer = BufWriter::new(file);
+        write_tsv_content(&mut writer, headers, records)?;
+        writer.flush()?;
     }
 
     Ok(())
+}
+
+fn write_tsv_content<W: Write>(
+    writer: &mut W,
+    headers: &[String],
+    records: &[ReformattedVcfRecord],
+) -> std::io::Result<()> {
+    // Write headers
+    writeln!(writer, "{}", headers.join("\t"))?;
+
+    // Write records
+    for record in records {
+        let mut row = Vec::new();
+
+        // Process each header in order to maintain column alignment
+        for header in headers {
+            let value = match header.as_str() {
+                "CHROM" => record.chromosome.clone(),
+                "POS" => record.position.to_string(),
+                "ID" => record.id.as_ref().unwrap_or(&".".to_string()).clone(),
+                "REF" => record.reference.clone(),
+                "ALT" => record.alternate.clone(),
+                "QUAL" => record.quality.map(|q| q.to_string()).unwrap_or(".".to_string()),
+                "FILTER" => record.filter.clone(),
+                _ => {
+                    // Handle INFO, CSQ, and sample fields
+                    if header.starts_with("INFO_") || header.starts_with("CSQ_") {
+                        record.info_fields.get(header).unwrap_or(&".".to_string()).clone()
+                    } else {
+                        // This is likely a sample field (SAMPLE_FORMAT)
+                        if let Some(ref sample_data) = record.format_sample_data {
+                            // Find the sample and format key by checking all samples
+                            let mut found_value = None;
+
+                            for sample in &sample_data.samples {
+                                for format_key in &sample_data.format_keys {
+                                    let expected_header = format!("{}_{}", sample.sample_name, format_key);
+                                    if expected_header == *header {
+                                        found_value = sample.format_fields.get(format_key).cloned();
+                                        break;
+                                    }
+                                }
+                                if found_value.is_some() {
+                                    break;
+                                }
+                            }
+
+                            found_value.unwrap_or(".".to_string())
+                        } else {
+                            ".".to_string()
+                        }
+                    }
+                }
+            };
+            row.push(value);
+        }
+
+        writeln!(writer, "{}", row.join("\t"))?;
+    }
+
+    Ok(())
+}
+
+
+pub fn reformat_vcf_data(
+    column_names: &str,
+    data_lines: &[String]
+) -> std::result::Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
+    // Default to FirstOnly for backward compatibility
+    reformat_vcf_data_with_header("", column_names, data_lines, TranscriptHandling::FirstOnly)
 }

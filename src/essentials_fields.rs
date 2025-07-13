@@ -1,4 +1,5 @@
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VcfVariant {
     pub chromosome: String,
     pub position: u64,
@@ -13,7 +14,8 @@ pub struct VcfVariant {
 }
 impl VcfVariant {
     // Constructor from a VCF line and column headers
-    pub fn from_line(line: &str, column_names: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
+    #[allow(dead_code)]
+    pub fn from_line(line: &str, _column_names: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
         //Flexible: Works with Vec<&str>, arrays [&str; N], or any slice
         // No copying: Just borrows references, very efficient
         // No ownership: Function doesn't take ownership of your data
@@ -24,7 +26,7 @@ impl VcfVariant {
             return Err("VCF line has too few fields".into());
         }
 
-        // Parse required fields (first 8 are standard VCF)
+        // Parse required fields (The first 8 are standard VCF)
         let chromosome = fields[0].to_string();
         let position = fields[1].parse::<u64>()?;
         let id = if fields[2] == "." { None } else { Some(fields[2].to_string()) };
@@ -58,6 +60,7 @@ impl VcfVariant {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MafRecord {
     pub hugo_symbol: String,
     pub entrez_gene_id: Option<u32>,
@@ -76,6 +79,5 @@ pub struct MafRecord {
     pub dbsnp_val_status: Option<String>,
     pub tumor_sample_barcode: String,
     pub matched_norm_sample_barcode: Option<String>,
-    // ... additional MAF fields
 }
 
