@@ -13,6 +13,7 @@ Also incredibly useful for quick checks to your data!
 [![Rust](https://img.shields.io/badge/rust-1.70+-blue.svg)](https://www.rust-lang.org)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Performance](https://img.shields.io/badge/performance-10k--30k%20variants%2Fsec-green.svg)]()
+[![Release](https://img.shields.io/github/v/release/flalom/vcf-reformatter)](https://github.com/flalom/vcf-reformatter/releases)
 
 **Transform complex VCF files into clean, analyzable tables with ease**
 
@@ -37,7 +38,7 @@ cargo build --release
 
 **The Problem:** VCF files are notoriously difficult to analyze. Complex nested annotations, semicolon-separated INFO fields, and multi-transcript VEP annotations make downstream analysis a nightmare.
 
-**The Solution:** VCF Reformatter flattens everything into clean, readable TSV format that works seamlessly with Excel, R, Python, and any analysis tool.
+**The Solution:** VCF Reformatter flattens everything into clean, readable TSV format that works seamlessly with Excel, R, Python, and any analysis tool (⚠️ beware Excel auto-correction!).
 
 ### Before & After
 
@@ -53,14 +54,14 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 
 ## ✨ Key Features
 
-| Feature | Description | Benefit |
-|---------|-------------|---------|
-| 🧬 **VEP Annotation Parsing** | Intelligent handling of CSQ annotations | No more manual parsing of complex VEP output |
-| 🔀 **Smart Transcript Handling** | Most severe, first only, or split transcripts | Choose the analysis approach that fits your needs |
-| 🚀 **Parallel Processing** | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours |
-| 📁 **Native Compression** | Direct `.vcf.gz` reading & gzip output | Seamless workflow with compressed files |
-| 🎯 **Production Ready** | Comprehensive error handling & logging | Reliable for automated pipelines |
-| 🐳 **Container Support** | Docker & Singularity ready | Deploy anywhere, from laptops to HPC clusters |
+| Feature | Description | Benefit                                              |
+|---------|-------------|------------------------------------------------------|
+| 🧬 **VEP Annotation Parsing** | Intelligent handling of CSQ annotations | No more manual parsing of complex VEP output         |
+| 🔀 **Smart Transcript Handling** | Most severe, first only, or split transcripts | Choose the analysis approach that fits your needs    |
+| 🚀 **Parallel Processing** | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
+| 📁 **Native Compression** | Direct `.vcf.gz` reading & gzip output | Seamless workflow with compressed/unconpressed files |
+| 🎯 **Production Ready** | Comprehensive error handling & logging | Reliable for automated pipelines                     |
+| 🐳 **Container Support** | Docker & Singularity ready | Deploy anywhere, from laptops to HPC clusters        |
 
 ---
 
@@ -306,7 +307,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 - **📋 Issues**: [GitHub Issues](https://github.com/flalom/vcf-reformatter/issues)
-- **💬 Discussions**: [GitHub Discussions](https://github.com/flalom/vcf-reformatter/discussions)
 - **📧 Email**: [fl@flaviolombardo.site](mailto:fl@flaviolombardo.site)
 
 ---
@@ -318,19 +318,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 Made with ❤️ by [Flavio Lombardo](https://github.com/flalom)
 
 </div>
-
-## Key Improvements Made:
-
-1. **🎯 Clear Value Proposition**: Immediately explains the problem and solution
-2. **📊 Visual Structure**: Tables, badges, and clear sections for easy scanning
-3. **🚀 Quick Start**: Get users running in seconds
-4. **📈 Performance Focus**: Concrete benchmarks and optimization tips
-5. **🔧 Integration Examples**: Real-world usage in R, Python, and workflows
-6. **🐳 Container-Ready**: Comprehensive Docker/Singularity instructions
-7. **📝 Professional Layout**: Clean formatting with emojis and consistent styling
-8. **🤝 Community-Friendly**: Clear contributing guidelines and support channels
-
----
-
 
 
