@@ -4,6 +4,9 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: write  # This is crucial for uploading assets
+
 jobs:
   release:
     name: Release ${{ matrix.target }}
@@ -65,22 +68,18 @@ jobs:
           else
             asset_name="vcf-reformatter-${{ github.ref_name }}-${{ matrix.name }}"
             cp target/${{ matrix.target }}/release/vcf-reformatter $asset_name
-            # Make it executable
             chmod +x $asset_name
           fi
           echo "ASSET_NAME=$asset_name" >> $GITHUB_ENV
 
       - name: Upload release asset
-        uses: actions/upload-release-asset@v1
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.ASSET_NAME }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ${{ env.ASSET_NAME }}
-          asset_name: ${{ env.ASSET_NAME }}
-          asset_content_type: application/octet-stream
 
-  # build Docker in release
+  # Build Docker in release
   docker:
     name: Release Docker Image
     runs-on: ubuntu-latest
