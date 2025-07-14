@@ -1,6 +1,6 @@
 use regex::Regex;
 
-pub fn extract_csq_regex(parsed_lines: &mut Vec<String>) -> Option<String> {
+pub fn extract_csq_regex(parsed_lines: &mut [String]) -> Option<String> {
     if parsed_lines.len() < 8 {
         return None;
     }
@@ -30,4 +30,3 @@ pub fn extract_csq_regex(parsed_lines: &mut Vec<String>) -> Option<String> {
 
     None
 }
-

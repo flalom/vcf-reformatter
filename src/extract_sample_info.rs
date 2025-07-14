@@ -12,6 +12,12 @@ pub struct ParsedFormatSample {
     pub samples: Vec<ParsedSample>,
 }
 
+impl Default for ParsedFormatSample {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParsedFormatSample {
     pub fn new() -> Self {
         ParsedFormatSample {
@@ -38,7 +44,10 @@ impl ParsedFormatSample {
 
         for sample in &self.samples {
             for format_key in &self.format_keys {
-                let value = sample.format_fields.get(format_key).unwrap_or(&default_value);
+                let value = sample
+                    .format_fields
+                    .get(format_key)
+                    .unwrap_or(&default_value);
                 values.push(value.clone());
             }
         }
@@ -79,11 +88,12 @@ pub fn parse_format_and_samples(
         if format_str.trim().is_empty() {
             return Ok(parsed);
         }
-        
+
         parsed.format_keys = format_str.split(':').map(|s| s.to_string()).collect();
 
         for (i, sample_field) in sample_fields.iter().enumerate() {
-            let sample_name = sample_names.get(i)
+            let sample_name = sample_names
+                .get(i)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("SAMPLE_{}", i + 1));
 
@@ -91,9 +101,7 @@ pub fn parse_format_and_samples(
             let mut format_fields = HashMap::new();
 
             for (j, format_key) in parsed.format_keys.iter().enumerate() {
-                let value = sample_values.get(j)
-                    .unwrap_or(&".")
-                    .to_string();
+                let value = sample_values.get(j).unwrap_or(&".").to_string();
                 format_fields.insert(format_key.clone(), value);
             }
 
@@ -119,7 +127,10 @@ mod tests {
 
         let parsed = parse_format_and_samples(format, &sample_fields, &sample_names).unwrap();
 
-        assert_eq!(parsed.format_keys, vec!["GT", "DP", "AD", "RO", "QR", "AO", "QA", "GL"]);
+        assert_eq!(
+            parsed.format_keys,
+            vec!["GT", "DP", "AD", "RO", "QR", "AO", "QA", "GL"]
+        );
         assert_eq!(parsed.samples.len(), 1);
         assert_eq!(parsed.samples[0].sample_name, "B505_B505_V_1");
         assert_eq!(parsed.samples[0].format_fields.get("GT").unwrap(), "1/1");
@@ -133,19 +144,27 @@ mod tests {
         parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
 
         let mut sample1 = SampleData::new("SAMPLE1".to_string());
-        sample1.format_fields.insert("GT".to_string(), "0/1".to_string());
-        sample1.format_fields.insert("DP".to_string(), "20".to_string());
+        sample1
+            .format_fields
+            .insert("GT".to_string(), "0/1".to_string());
+        sample1
+            .format_fields
+            .insert("DP".to_string(), "20".to_string());
 
         let mut sample2 = SampleData::new("SAMPLE2".to_string());
-        sample2.format_fields.insert("GT".to_string(), "1/1".to_string());
-        sample2.format_fields.insert("DP".to_string(), "30".to_string());
+        sample2
+            .format_fields
+            .insert("GT".to_string(), "1/1".to_string());
+        sample2
+            .format_fields
+            .insert("DP".to_string(), "30".to_string());
 
         parsed.samples = vec![sample1, sample2];
 
         let headers = parsed.get_headers_for_samples();
-        assert_eq!(headers, vec![
-            "SAMPLE1_GT", "SAMPLE1_DP",
-            "SAMPLE2_GT", "SAMPLE2_DP"
-        ]);
+        assert_eq!(
+            headers,
+            vec!["SAMPLE1_GT", "SAMPLE1_DP", "SAMPLE2_GT", "SAMPLE2_DP"]
+        );
     }
 }

@@ -15,7 +15,10 @@ pub struct VcfVariant {
 impl VcfVariant {
     // Constructor from a VCF line and column headers
     #[allow(dead_code)]
-    pub fn from_line(line: &str, _column_names: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_line(
+        line: &str,
+        _column_names: &[&str],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         //Flexible: Works with Vec<&str>, arrays [&str; N], or any slice
         // No copying: Just borrows references, very efficient
         // No ownership: Function doesn't take ownership of your data
@@ -29,15 +32,27 @@ impl VcfVariant {
         // Parse required fields (The first 8 are standard VCF)
         let chromosome = fields[0].to_string();
         let position = fields[1].parse::<u64>()?;
-        let id = if fields[2] == "." { None } else { Some(fields[2].to_string()) };
+        let id = if fields[2] == "." {
+            None
+        } else {
+            Some(fields[2].to_string())
+        };
         let reference = fields[3].to_string();
         let alternate = fields[4].to_string();
-        let quality = if fields[5] == "." { None } else { Some(fields[5].parse::<f64>()?) };
+        let quality = if fields[5] == "." {
+            None
+        } else {
+            Some(fields[5].parse::<f64>()?)
+        };
         let filter = fields[6].to_string();
         let info = fields[7].to_string();
 
         // Handle optional FORMAT and sample columns
-        let format = if fields.len() > 8 { Some(fields[8].to_string()) } else { None };
+        let format = if fields.len() > 8 {
+            Some(fields[8].to_string())
+        } else {
+            None
+        };
         let samples = if fields.len() > 9 {
             fields[9..].iter().map(|s| s.to_string()).collect()
         } else {
@@ -80,4 +95,3 @@ pub struct MafRecord {
     pub tumor_sample_barcode: String,
     pub matched_norm_sample_barcode: Option<String>,
 }
-

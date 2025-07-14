@@ -83,7 +83,7 @@ docker build -t vcf-reformatter .
 # Run with your data
 docker run --rm -v $(pwd):/data vcf-reformatter /data/sample.vcf.gz
 ```
-### Option 3: Singularity (HPC Environments)
+### Option 3: Singularity
 ```shell script
 # Build Singularity image
 singularity build vcf-reformatter.sif Singularity

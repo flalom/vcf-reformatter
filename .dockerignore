@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+README.md
+.github/
+test_data/
+*.vcf
+*.vcf.gz
+Dockerfile
+.dockerignore

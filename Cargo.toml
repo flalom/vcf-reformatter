@@ -1,7 +1,7 @@
 [package]
 name = "vcf-reformatter"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "Fast VCF file parser and reformatter with VEP annotation support"
 authors = ["Flavio Lombardo <fl@flaviolombardo.site>"]
 license = "MIT"

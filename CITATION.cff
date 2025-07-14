@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use VCF Reformatter in your research, please cite it as below."
+title: "VCF Reformatter: High-performance VCF file parser and reformatter with VEP annotation support"
+version: "0.1.0"
+date-released: "2025-07-14"
+url: "https://github.com/flalom/vcf-reformatter"
+repository-code: "https://github.com/flalom/vcf-reformatter"
+type: software
+license: MIT
+
+authors:
+  - family-names: "Lombardo"
+    given-names: "Flavio"
+    orcid: "https://orcid.org/0000-0002-4853-6838"
+    affiliation: "University Hospital Basel and University of Basel"
+    email: "fl@flaviolombardo.site"
+
+abstract: >
+  VCF Reformatter is a high-performance Rust command-line tool for parsing and
+  reformatting VCF (Variant Call Format) files, with special support for VEP
+  (Variant Effect Predictor) annotations. The tool flattens complex VCF files
+  into tab-separated values (TSV) format for easier downstream analysis,
+  supporting intelligent transcript handling and parallel processing for
+  high-throughput genomic workflows.
+
+keywords:
+  - bioinformatics
+  - genomics
+  - VCF
+  - variant calling
+  - VEP annotations
+  - file format conversion
+  - parallel processing
+  - rust
+  - computational biology

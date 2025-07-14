@@ -1,23 +1,19 @@
-use std::fs::File;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;
 
 use vcf_reformatter::{
-    read_vcf_gz::read_vcf_gz,
     essentials_fields::VcfVariant,
     extract_csq_and_csq_names::extract_csq_regex,
-    get_info_from_header::{extract_csq_format_from_header, extract_all_info_descriptions},
+    extract_sample_info::{parse_format_and_samples, ParsedFormatSample, SampleData},
+    get_info_from_header::{extract_all_info_descriptions, extract_csq_format_from_header},
+    read_vcf_gz::read_vcf_gz,
     reformat_vcf::{
-        reformat_vcf_data_with_header,
-        reformat_vcf_data_with_header_parallel,
-        TranscriptHandling,
-        write_reformatted_vcf,
-        ReformattedVcfRecord
+        reformat_vcf_data_with_header, reformat_vcf_data_with_header_parallel,
+        write_reformatted_vcf, ReformattedVcfRecord, TranscriptHandling,
     },
-    extract_sample_info::{parse_format_and_samples, ParsedFormatSample, SampleData}
 };
-use vcf_reformatter::extract_sample_info::ParsedSample;
 // ------------------------------------------------------------------------------
 // Tests for read_vcf_gz.rs
 // ------------------------------------------------------------------------------
@@ -29,7 +25,11 @@ fn test_basic_vcf_processing() {
 
     let mut file = File::create(&file_path).unwrap();
     writeln!(file, "##fileformat=VCFv4.2").unwrap();
-    writeln!(file, "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">").unwrap();
+    writeln!(
+        file,
+        "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">"
+    )
+    .unwrap();
     writeln!(file, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO").unwrap();
     writeln!(file, "chr1\t100\t.\tA\tG\t60\tPASS\tDP=10").unwrap();
 
@@ -49,7 +49,11 @@ fn test_vcf_with_multiple_lines() {
 
     let mut file = File::create(&file_path).unwrap();
     writeln!(file, "##fileformat=VCFv4.2").unwrap();
-    writeln!(file, "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">").unwrap();
+    writeln!(
+        file,
+        "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">"
+    )
+    .unwrap();
     writeln!(file, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO").unwrap();
     writeln!(file, "chr1\t100\t.\tA\tG\t60\tPASS\tDP=10").unwrap();
     writeln!(file, "chr2\t200\trs123\tC\tT\t80\tPASS\tDP=20").unwrap();
@@ -58,7 +62,7 @@ fn test_vcf_with_multiple_lines() {
     let result = read_vcf_gz(file_path.to_str().unwrap());
     assert!(result.is_ok());
 
-    let (header, columns, data) = result.unwrap();
+    let (header, _columns, data) = result.unwrap();
     assert_eq!(header.matches('\n').count(), 2); // 2 header lines
     assert_eq!(data.len(), 3); // 3 data lines
 }
@@ -70,9 +74,13 @@ fn test_vcf_with_empty_lines() {
 
     let mut file = File::create(&file_path).unwrap();
     writeln!(file, "##fileformat=VCFv4.2").unwrap();
-    writeln!(file, "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">").unwrap();
+    writeln!(
+        file,
+        "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">"
+    )
+    .unwrap();
     writeln!(file, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO").unwrap();
-    writeln!(file, "").unwrap(); // Empty line
+    writeln!(file).unwrap(); // Empty line
     writeln!(file, "chr1\t100\t.\tA\tG\t60\tPASS\tDP=10").unwrap();
     writeln!(file, "  ").unwrap(); // Whitespace line
     writeln!(file, "chr2\t200\trs123\tC\tT\t80\tPASS\tDP=20").unwrap();
@@ -112,7 +120,10 @@ fn test_vcf_variant_parsing() {
 #[test]
 fn test_vcf_variant_with_id_and_samples() {
     let line = "chr2\t200\trs123\tC\tT\t80\tPASS\tDP=20\tGT:DP\t0/1:20\t1/1:22";
-    let column_names = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "SAMPLE1", "SAMPLE2"];
+    let column_names = [
+        "CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "SAMPLE1",
+        "SAMPLE2",
+    ];
 
     let result = VcfVariant::from_line(line, &column_names);
     assert!(result.is_ok());
@@ -176,7 +187,7 @@ fn test_extract_csq_regex() {
         "G".to_string(),
         "60".to_string(),
         "PASS".to_string(),
-        "DP=10;CSQ=A|B|C;AF=0.5".to_string()
+        "DP=10;CSQ=A|B|C;AF=0.5".to_string(),
     ];
 
     let result = extract_csq_regex(&mut parsed_lines);
@@ -197,7 +208,7 @@ fn test_extract_csq_regex_no_csq() {
         "G".to_string(),
         "60".to_string(),
         "PASS".to_string(),
-        "DP=10;AF=0.5".to_string()
+        "DP=10;AF=0.5".to_string(),
     ];
 
     let result = extract_csq_regex(&mut parsed_lines);
@@ -217,7 +228,7 @@ fn test_extract_csq_regex_empty_csq() {
         "G".to_string(),
         "60".to_string(),
         "PASS".to_string(),
-        "DP=10;CSQ=;AF=0.5".to_string()
+        "DP=10;CSQ=;AF=0.5".to_string(),
     ];
 
     let result = extract_csq_regex(&mut parsed_lines);
@@ -237,7 +248,7 @@ fn test_extract_csq_regex_too_few_fields() {
         "A".to_string(),
         "G".to_string(),
         "60".to_string(),
-        "PASS".to_string()
+        "PASS".to_string(),
     ];
 
     let result = extract_csq_regex(&mut parsed_lines);
@@ -257,7 +268,10 @@ fn test_extract_csq_format_from_header() {
     assert!(result.is_some());
 
     let fields = result.unwrap();
-    assert_eq!(fields, vec!["Allele", "Consequence", "IMPACT", "SYMBOL", "Gene"]);
+    assert_eq!(
+        fields,
+        vec!["Allele", "Consequence", "IMPACT", "SYMBOL", "Gene"]
+    );
 }
 
 #[test]
@@ -369,20 +383,28 @@ fn test_get_headers_for_samples() {
     parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
 
     let mut sample1 = SampleData::new("SAMPLE1".to_string());
-    sample1.format_fields.insert("GT".to_string(), "0/1".to_string());
-    sample1.format_fields.insert("DP".to_string(), "20".to_string());
+    sample1
+        .format_fields
+        .insert("GT".to_string(), "0/1".to_string());
+    sample1
+        .format_fields
+        .insert("DP".to_string(), "20".to_string());
 
     let mut sample2 = SampleData::new("SAMPLE2".to_string());
-    sample2.format_fields.insert("GT".to_string(), "1/1".to_string());
-    sample2.format_fields.insert("DP".to_string(), "30".to_string());
+    sample2
+        .format_fields
+        .insert("GT".to_string(), "1/1".to_string());
+    sample2
+        .format_fields
+        .insert("DP".to_string(), "30".to_string());
 
     parsed.samples = vec![sample1, sample2];
 
     let headers = parsed.get_headers_for_samples();
-    assert_eq!(headers, vec![
-        "SAMPLE1_GT", "SAMPLE1_DP",
-        "SAMPLE2_GT", "SAMPLE2_DP"
-    ]);
+    assert_eq!(
+        headers,
+        vec!["SAMPLE1_GT", "SAMPLE1_DP", "SAMPLE2_GT", "SAMPLE2_DP"]
+    );
 }
 
 #[test]
@@ -391,20 +413,25 @@ fn test_get_values_for_samples() {
     parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
 
     let mut sample1 = SampleData::new("SAMPLE1".to_string());
-    sample1.format_fields.insert("GT".to_string(), "0/1".to_string());
-    sample1.format_fields.insert("DP".to_string(), "20".to_string());
+    sample1
+        .format_fields
+        .insert("GT".to_string(), "0/1".to_string());
+    sample1
+        .format_fields
+        .insert("DP".to_string(), "20".to_string());
 
     let mut sample2 = SampleData::new("SAMPLE2".to_string());
-    sample2.format_fields.insert("GT".to_string(), "1/1".to_string());
-    sample2.format_fields.insert("DP".to_string(), "30".to_string());
+    sample2
+        .format_fields
+        .insert("GT".to_string(), "1/1".to_string());
+    sample2
+        .format_fields
+        .insert("DP".to_string(), "30".to_string());
 
     parsed.samples = vec![sample1, sample2];
 
     let values = parsed.get_values_for_samples();
-    assert_eq!(values, vec![
-        "0/1", "20",
-        "1/1", "30"
-    ]);
+    assert_eq!(values, vec!["0/1", "20", "1/1", "30"]);
 }
 
 // ------------------------------------------------------------------------------
@@ -418,14 +445,14 @@ fn test_reformat_vcf_data_with_header() {
     let column_names = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
     let data_lines = vec![
         "chr1\t100\t.\tA\tG\t60\tPASS\tDP=10".to_string(),
-        "chr2\t200\trs123\tC\tT\t80\tPASS\tDP=20".to_string()
+        "chr2\t200\trs123\tC\tT\t80\tPASS\tDP=20".to_string(),
     ];
 
     let result = reformat_vcf_data_with_header(
         header,
         column_names,
         &data_lines,
-        TranscriptHandling::FirstOnly
+        TranscriptHandling::FirstOnly,
     );
 
     assert!(result.is_ok());
@@ -451,14 +478,15 @@ fn test_reformat_vcf_data_with_csq() {
     let column_names = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
     let data_lines = vec![
         "chr1\t100\t.\tA\tG\t60\tPASS\tCSQ=G|missense_variant|MODERATE".to_string(),
-        "chr2\t200\trs123\tC\tT\t80\tPASS\tCSQ=T|synonymous_variant|LOW,T|intron_variant|MODIFIER".to_string()
+        "chr2\t200\trs123\tC\tT\t80\tPASS\tCSQ=T|synonymous_variant|LOW,T|intron_variant|MODIFIER"
+            .to_string(),
     ];
 
     let result = reformat_vcf_data_with_header(
         header,
         column_names,
         &data_lines,
-        TranscriptHandling::FirstOnly
+        TranscriptHandling::FirstOnly,
     );
 
     assert!(result.is_ok());
@@ -470,11 +498,20 @@ fn test_reformat_vcf_data_with_csq() {
 
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].info_fields.get("CSQ_Allele").unwrap(), "G");
-    assert_eq!(records[0].info_fields.get("CSQ_Consequence").unwrap(), "missense_variant");
-    assert_eq!(records[0].info_fields.get("CSQ_IMPACT").unwrap(), "MODERATE");
+    assert_eq!(
+        records[0].info_fields.get("CSQ_Consequence").unwrap(),
+        "missense_variant"
+    );
+    assert_eq!(
+        records[0].info_fields.get("CSQ_IMPACT").unwrap(),
+        "MODERATE"
+    );
 
     assert_eq!(records[1].info_fields.get("CSQ_Allele").unwrap(), "T");
-    assert_eq!(records[1].info_fields.get("CSQ_Consequence").unwrap(), "synonymous_variant");
+    assert_eq!(
+        records[1].info_fields.get("CSQ_Consequence").unwrap(),
+        "synonymous_variant"
+    );
     assert_eq!(records[1].info_fields.get("CSQ_IMPACT").unwrap(), "LOW");
 }
 
@@ -484,14 +521,15 @@ fn test_reformat_vcf_data_with_split_transcripts() {
 ##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT">"#;
     let column_names = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
     let data_lines = vec![
-        "chr1\t100\t.\tA\tG\t60\tPASS\tCSQ=G|missense_variant|MODERATE,G|intron_variant|MODIFIER".to_string()
+        "chr1\t100\t.\tA\tG\t60\tPASS\tCSQ=G|missense_variant|MODERATE,G|intron_variant|MODIFIER"
+            .to_string(),
     ];
 
     let result = reformat_vcf_data_with_header(
         header,
         column_names,
         &data_lines,
-        TranscriptHandling::SplitRows
+        TranscriptHandling::SplitRows,
     );
 
     assert!(result.is_ok());
@@ -499,11 +537,23 @@ fn test_reformat_vcf_data_with_split_transcripts() {
     let (_, records) = result.unwrap();
     assert_eq!(records.len(), 2); // Should split into 2 records
 
-    assert_eq!(records[0].info_fields.get("CSQ_Consequence").unwrap(), "missense_variant");
-    assert_eq!(records[0].info_fields.get("CSQ_IMPACT").unwrap(), "MODERATE");
+    assert_eq!(
+        records[0].info_fields.get("CSQ_Consequence").unwrap(),
+        "missense_variant"
+    );
+    assert_eq!(
+        records[0].info_fields.get("CSQ_IMPACT").unwrap(),
+        "MODERATE"
+    );
 
-    assert_eq!(records[1].info_fields.get("CSQ_Consequence").unwrap(), "intron_variant");
-    assert_eq!(records[1].info_fields.get("CSQ_IMPACT").unwrap(), "MODIFIER");
+    assert_eq!(
+        records[1].info_fields.get("CSQ_Consequence").unwrap(),
+        "intron_variant"
+    );
+    assert_eq!(
+        records[1].info_fields.get("CSQ_IMPACT").unwrap(),
+        "MODIFIER"
+    );
 }
 
 #[test]
@@ -519,7 +569,7 @@ fn test_reformat_vcf_data_with_most_severe() {
         header,
         column_names,
         &data_lines,
-        TranscriptHandling::MostSevere
+        TranscriptHandling::MostSevere,
     );
 
     assert!(result.is_ok());
@@ -528,7 +578,10 @@ fn test_reformat_vcf_data_with_most_severe() {
     assert_eq!(records.len(), 1);
 
     // stop_gained is more severe than synonymous_variant and intron_variant
-    assert_eq!(records[0].info_fields.get("CSQ_Consequence").unwrap(), "stop_gained");
+    assert_eq!(
+        records[0].info_fields.get("CSQ_Consequence").unwrap(),
+        "stop_gained"
+    );
     assert_eq!(records[0].info_fields.get("CSQ_IMPACT").unwrap(), "HIGH");
 }
 
@@ -548,7 +601,7 @@ fn test_parallel_processing() {
         header,
         column_names,
         &data_lines,
-        TranscriptHandling::FirstOnly
+        TranscriptHandling::FirstOnly,
     );
 
     assert!(result.is_ok());
@@ -575,14 +628,28 @@ fn test_write_reformatted_vcf() {
         format_sample_data: None,
     };
 
-    record.info_fields.insert("INFO_DP".to_string(), "10".to_string());
-    record.info_fields.insert("CSQ_Allele".to_string(), "G".to_string());
-    record.info_fields.insert("CSQ_Consequence".to_string(), "missense_variant".to_string());
+    record
+        .info_fields
+        .insert("INFO_DP".to_string(), "10".to_string());
+    record
+        .info_fields
+        .insert("CSQ_Allele".to_string(), "G".to_string());
+    record.info_fields.insert(
+        "CSQ_Consequence".to_string(),
+        "missense_variant".to_string(),
+    );
 
     let headers = vec![
-        "CHROM".to_string(), "POS".to_string(), "ID".to_string(),
-        "REF".to_string(), "ALT".to_string(), "QUAL".to_string(), "FILTER".to_string(),
-        "INFO_DP".to_string(), "CSQ_Allele".to_string(), "CSQ_Consequence".to_string()
+        "CHROM".to_string(),
+        "POS".to_string(),
+        "ID".to_string(),
+        "REF".to_string(),
+        "ALT".to_string(),
+        "QUAL".to_string(),
+        "FILTER".to_string(),
+        "INFO_DP".to_string(),
+        "CSQ_Allele".to_string(),
+        "CSQ_Consequence".to_string(),
     ];
 
     let records = vec![record];
@@ -591,7 +658,7 @@ fn test_write_reformatted_vcf() {
         output_path.to_str().unwrap(),
         &headers,
         &records,
-        false // No compression
+        false, // No compression
     );
 
     assert!(result.is_ok());
@@ -599,13 +666,14 @@ fn test_write_reformatted_vcf() {
 
     // Check file content
     let content = std::fs::read_to_string(output_path).unwrap();
-    assert!(content.contains("CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO_DP\tCSQ_Allele\tCSQ_Consequence"));
+    assert!(content
+        .contains("CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO_DP\tCSQ_Allele\tCSQ_Consequence"));
     assert!(content.contains("chr1\t100\t.\tA\tG\t60\tPASS\t10\tG\tmissense_variant"));
 }
 
 #[test]
 fn test_complex_sample_names_with_underscores() {
-    use vcf_reformatter::extract_sample_info::{parse_format_and_samples};
+    use vcf_reformatter::extract_sample_info::parse_format_and_samples;
 
     // Test with complex sample names containing underscores (like B487_B487_1_cOM)
     let format = Some("GT:AD:AF:DP:F1R2:F2R1:FAD:SB");
@@ -613,15 +681,15 @@ fn test_complex_sample_names_with_underscores() {
         "0/0:257,4:0.017:261:109,0:87,3:229,3:164,93,3,1".to_string(),
         "0/1:303,6:0.020:309:105,3:106,1:245,4:187,116,2,4".to_string(),
     ];
-    let sample_names = vec![
-        "B487_B487_1_cOM".to_string(),
-        "B487_B487_2_LN".to_string(),
-    ];
+    let sample_names = vec!["B487_B487_1_cOM".to_string(), "B487_B487_2_LN".to_string()];
 
     let parsed = parse_format_and_samples(format, &sample_fields, &sample_names).unwrap();
 
     // Verify format keys
-    assert_eq!(parsed.format_keys, vec!["GT", "AD", "AF", "DP", "F1R2", "F2R1", "FAD", "SB"]);
+    assert_eq!(
+        parsed.format_keys,
+        vec!["GT", "AD", "AF", "DP", "F1R2", "F2R1", "FAD", "SB"]
+    );
 
     // Verify sample count
     assert_eq!(parsed.samples.len(), 2);
@@ -632,10 +700,16 @@ fn test_complex_sample_names_with_underscores() {
     assert_eq!(parsed.samples[0].format_fields.get("AD").unwrap(), "257,4");
     assert_eq!(parsed.samples[0].format_fields.get("AF").unwrap(), "0.017");
     assert_eq!(parsed.samples[0].format_fields.get("DP").unwrap(), "261");
-    assert_eq!(parsed.samples[0].format_fields.get("F1R2").unwrap(), "109,0");
+    assert_eq!(
+        parsed.samples[0].format_fields.get("F1R2").unwrap(),
+        "109,0"
+    );
     assert_eq!(parsed.samples[0].format_fields.get("F2R1").unwrap(), "87,3");
     assert_eq!(parsed.samples[0].format_fields.get("FAD").unwrap(), "229,3");
-    assert_eq!(parsed.samples[0].format_fields.get("SB").unwrap(), "164,93,3,1");
+    assert_eq!(
+        parsed.samples[0].format_fields.get("SB").unwrap(),
+        "164,93,3,1"
+    );
 
     // Verify second sample
     assert_eq!(parsed.samples[1].sample_name, "B487_B487_2_LN");
@@ -643,33 +717,45 @@ fn test_complex_sample_names_with_underscores() {
     assert_eq!(parsed.samples[1].format_fields.get("AD").unwrap(), "303,6");
     assert_eq!(parsed.samples[1].format_fields.get("AF").unwrap(), "0.020");
     assert_eq!(parsed.samples[1].format_fields.get("DP").unwrap(), "309");
-    assert_eq!(parsed.samples[1].format_fields.get("F1R2").unwrap(), "105,3");
-    assert_eq!(parsed.samples[1].format_fields.get("F2R1").unwrap(), "106,1");
+    assert_eq!(
+        parsed.samples[1].format_fields.get("F1R2").unwrap(),
+        "105,3"
+    );
+    assert_eq!(
+        parsed.samples[1].format_fields.get("F2R1").unwrap(),
+        "106,1"
+    );
     assert_eq!(parsed.samples[1].format_fields.get("FAD").unwrap(), "245,4");
-    assert_eq!(parsed.samples[1].format_fields.get("SB").unwrap(), "187,116,2,4");
+    assert_eq!(
+        parsed.samples[1].format_fields.get("SB").unwrap(),
+        "187,116,2,4"
+    );
 }
 
 #[test]
 fn test_complex_sample_names_header_generation() {
-    use vcf_reformatter::extract_sample_info::{parse_format_and_samples};
+    use vcf_reformatter::extract_sample_info::parse_format_and_samples;
 
     let format = Some("GT:AD:AF:DP");
     let sample_fields = vec![
         "0/0:257,4:0.017:261".to_string(),
         "0/1:303,6:0.020:309".to_string(),
     ];
-    let sample_names = vec![
-        "B487_B487_1_cOM".to_string(),
-        "B487_B487_2_LN".to_string(),
-    ];
+    let sample_names = vec!["B487_B487_1_cOM".to_string(), "B487_B487_2_LN".to_string()];
 
     let parsed = parse_format_and_samples(format, &sample_fields, &sample_names).unwrap();
     let headers = parsed.get_headers_for_samples();
 
     // Expected headers with complex sample names
     let expected_headers = vec![
-        "B487_B487_1_cOM_GT", "B487_B487_1_cOM_AD", "B487_B487_1_cOM_AF", "B487_B487_1_cOM_DP",
-        "B487_B487_2_LN_GT", "B487_B487_2_LN_AD", "B487_B487_2_LN_AF", "B487_B487_2_LN_DP"
+        "B487_B487_1_cOM_GT",
+        "B487_B487_1_cOM_AD",
+        "B487_B487_1_cOM_AF",
+        "B487_B487_1_cOM_DP",
+        "B487_B487_2_LN_GT",
+        "B487_B487_2_LN_AD",
+        "B487_B487_2_LN_AF",
+        "B487_B487_2_LN_DP",
     ];
 
     assert_eq!(headers, expected_headers);
@@ -677,25 +763,22 @@ fn test_complex_sample_names_header_generation() {
 
 #[test]
 fn test_complex_sample_names_value_extraction() {
-    use vcf_reformatter::extract_sample_info::{parse_format_and_samples};
+    use vcf_reformatter::extract_sample_info::parse_format_and_samples;
 
     let format = Some("GT:AD:AF:DP");
     let sample_fields = vec![
         "0/0:257,4:0.017:261".to_string(),
         "0/1:303,6:0.020:309".to_string(),
     ];
-    let sample_names = vec![
-        "B487_B487_1_cOM".to_string(),
-        "B487_B487_2_LN".to_string(),
-    ];
+    let sample_names = vec!["B487_B487_1_cOM".to_string(), "B487_B487_2_LN".to_string()];
 
     let parsed = parse_format_and_samples(format, &sample_fields, &sample_names).unwrap();
     let values = parsed.get_values_for_samples();
 
     // Expected values in the same order as headers
     let expected_values = vec![
-        "0/0", "257,4", "0.017", "261",     // B487_B487_1_cOM
-        "0/1", "303,6", "0.020", "309"      // B487_B487_2_LN
+        "0/0", "257,4", "0.017", "261", // B487_B487_1_cOM
+        "0/1", "303,6", "0.020", "309", // B487_B487_2_LN
     ];
 
     assert_eq!(values, expected_values);
@@ -709,16 +792,26 @@ fn test_vcf_record_with_complex_sample_names() {
     let vcf_line = "chr1\t123456\t.\tA\tG\t1000\tPASS\tDP=570;AF=0.5\tGT:AD:AF:DP:F1R2:F2R1:FAD:SB\t0/0:257,4:0.017:261:109,0:87,3:229,3:164,93,3,1\t0/1:303,6:0.020:309:105,3:106,1:245,4:187,116,2,4";
 
     let column_names = vec![
-        "#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT",
-        "B487_B487_1_cOM", "B487_B487_2_LN"
+        "#CHROM",
+        "POS",
+        "ID",
+        "REF",
+        "ALT",
+        "QUAL",
+        "FILTER",
+        "INFO",
+        "FORMAT",
+        "B487_B487_1_cOM",
+        "B487_B487_2_LN",
     ];
 
     let records = ReformattedVcfRecord::from_vcf_line(
         vcf_line,
         &column_names,
         &None,
-        TranscriptHandling::FirstOnly
-    ).unwrap();
+        TranscriptHandling::FirstOnly,
+    )
+    .unwrap();
 
     assert_eq!(records.len(), 1);
     let record = &records[0];
@@ -739,33 +832,66 @@ fn test_vcf_record_with_complex_sample_names() {
     assert_eq!(sample_data.samples[1].sample_name, "B487_B487_2_LN");
 
     // Verify sample values
-    assert_eq!(sample_data.samples[0].format_fields.get("GT").unwrap(), "0/0");
-    assert_eq!(sample_data.samples[0].format_fields.get("AD").unwrap(), "257,4");
-    assert_eq!(sample_data.samples[1].format_fields.get("GT").unwrap(), "0/1");
-    assert_eq!(sample_data.samples[1].format_fields.get("AD").unwrap(), "303,6");
+    assert_eq!(
+        sample_data.samples[0].format_fields.get("GT").unwrap(),
+        "0/0"
+    );
+    assert_eq!(
+        sample_data.samples[0].format_fields.get("AD").unwrap(),
+        "257,4"
+    );
+    assert_eq!(
+        sample_data.samples[1].format_fields.get("GT").unwrap(),
+        "0/1"
+    );
+    assert_eq!(
+        sample_data.samples[1].format_fields.get("AD").unwrap(),
+        "303,6"
+    );
 }
 
 #[test]
 fn test_tsv_output_with_complex_sample_names() {
-    use vcf_reformatter::reformat_vcf::{ReformattedVcfRecord};
     use std::collections::HashMap;
     use vcf_reformatter::extract_sample_info::{ParsedFormatSample, ParsedSample};
+    use vcf_reformatter::reformat_vcf::ReformattedVcfRecord;
 
     // Create a test record with complex sample names
     let mut sample_data = ParsedFormatSample::new();
-    sample_data.format_keys = vec!["GT".to_string(), "AD".to_string(), "AF".to_string(), "DP".to_string()];
+    sample_data.format_keys = vec![
+        "GT".to_string(),
+        "AD".to_string(),
+        "AF".to_string(),
+        "DP".to_string(),
+    ];
 
     let mut sample1 = ParsedSample::new("B487_B487_1_cOM".to_string());
-    sample1.format_fields.insert("GT".to_string(), "0/0".to_string());
-    sample1.format_fields.insert("AD".to_string(), "257,4".to_string());
-    sample1.format_fields.insert("AF".to_string(), "0.017".to_string());
-    sample1.format_fields.insert("DP".to_string(), "261".to_string());
+    sample1
+        .format_fields
+        .insert("GT".to_string(), "0/0".to_string());
+    sample1
+        .format_fields
+        .insert("AD".to_string(), "257,4".to_string());
+    sample1
+        .format_fields
+        .insert("AF".to_string(), "0.017".to_string());
+    sample1
+        .format_fields
+        .insert("DP".to_string(), "261".to_string());
 
     let mut sample2 = ParsedSample::new("B487_B487_2_LN".to_string());
-    sample2.format_fields.insert("GT".to_string(), "0/1".to_string());
-    sample2.format_fields.insert("AD".to_string(), "303,6".to_string());
-    sample2.format_fields.insert("AF".to_string(), "0.020".to_string());
-    sample2.format_fields.insert("DP".to_string(), "309".to_string());
+    sample2
+        .format_fields
+        .insert("GT".to_string(), "0/1".to_string());
+    sample2
+        .format_fields
+        .insert("AD".to_string(), "303,6".to_string());
+    sample2
+        .format_fields
+        .insert("AF".to_string(), "0.020".to_string());
+    sample2
+        .format_fields
+        .insert("DP".to_string(), "309".to_string());
 
     sample_data.samples = vec![sample1, sample2];
 
@@ -782,17 +908,23 @@ fn test_tsv_output_with_complex_sample_names() {
     };
 
     // Test header generation
-    let headers = vec![
-        "CHROM".to_string(), "POS".to_string(), "ID".to_string(), "REF".to_string(),
-        "ALT".to_string(), "QUAL".to_string(), "FILTER".to_string(),
-        "B487_B487_1_cOM_GT".to_string(), "B487_B487_1_cOM_AD".to_string(),
-        "B487_B487_1_cOM_AF".to_string(), "B487_B487_1_cOM_DP".to_string(),
-        "B487_B487_2_LN_GT".to_string(), "B487_B487_2_LN_AD".to_string(),
-        "B487_B487_2_LN_AF".to_string(), "B487_B487_2_LN_DP".to_string()
+    let _headers = vec![
+        "CHROM".to_string(),
+        "POS".to_string(),
+        "ID".to_string(),
+        "REF".to_string(),
+        "ALT".to_string(),
+        "QUAL".to_string(),
+        "FILTER".to_string(),
+        "B487_B487_1_cOM_GT".to_string(),
+        "B487_B487_1_cOM_AD".to_string(),
+        "B487_B487_1_cOM_AF".to_string(),
+        "B487_B487_1_cOM_DP".to_string(),
+        "B487_B487_2_LN_GT".to_string(),
+        "B487_B487_2_LN_AD".to_string(),
+        "B487_B487_2_LN_AF".to_string(),
+        "B487_B487_2_LN_DP".to_string(),
     ];
-
-    // Test that the write_tsv_content logic would work correctly
-    // (We can't directly test the private function, but we can verify the structure)
 
     // Test value extraction for specific headers
     let sample_data_ref = record.format_sample_data.as_ref().unwrap();
@@ -821,7 +953,7 @@ fn test_tsv_output_with_complex_sample_names() {
 
 #[test]
 fn test_edge_case_sample_names_with_multiple_underscores() {
-    use vcf_reformatter::extract_sample_info::{parse_format_and_samples};
+    use vcf_reformatter::extract_sample_info::parse_format_and_samples;
 
     // Test with even more complex sample names
     let format = Some("GT:DP");
@@ -840,8 +972,14 @@ fn test_edge_case_sample_names_with_multiple_underscores() {
 
     // Verify all samples are parsed correctly
     assert_eq!(parsed.samples.len(), 3);
-    assert_eq!(parsed.samples[0].sample_name, "SAMPLE_WITH_MANY_UNDERSCORES_1");
-    assert_eq!(parsed.samples[1].sample_name, "ANOTHER_COMPLEX_SAMPLE_NAME_2");
+    assert_eq!(
+        parsed.samples[0].sample_name,
+        "SAMPLE_WITH_MANY_UNDERSCORES_1"
+    );
+    assert_eq!(
+        parsed.samples[1].sample_name,
+        "ANOTHER_COMPLEX_SAMPLE_NAME_2"
+    );
     assert_eq!(parsed.samples[2].sample_name, "FINAL_TEST_SAMPLE_NAME_3");
 
     // Verify values
@@ -855,9 +993,12 @@ fn test_edge_case_sample_names_with_multiple_underscores() {
     // Test header generation
     let headers = parsed.get_headers_for_samples();
     let expected_headers = vec![
-        "SAMPLE_WITH_MANY_UNDERSCORES_1_GT", "SAMPLE_WITH_MANY_UNDERSCORES_1_DP",
-        "ANOTHER_COMPLEX_SAMPLE_NAME_2_GT", "ANOTHER_COMPLEX_SAMPLE_NAME_2_DP",
-        "FINAL_TEST_SAMPLE_NAME_3_GT", "FINAL_TEST_SAMPLE_NAME_3_DP"
+        "SAMPLE_WITH_MANY_UNDERSCORES_1_GT",
+        "SAMPLE_WITH_MANY_UNDERSCORES_1_DP",
+        "ANOTHER_COMPLEX_SAMPLE_NAME_2_GT",
+        "ANOTHER_COMPLEX_SAMPLE_NAME_2_DP",
+        "FINAL_TEST_SAMPLE_NAME_3_GT",
+        "FINAL_TEST_SAMPLE_NAME_3_DP",
     ];
     assert_eq!(headers, expected_headers);
 }

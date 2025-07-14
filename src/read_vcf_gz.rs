@@ -1,11 +1,13 @@
+use flate2::read::MultiGzDecoder;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use flate2::read::MultiGzDecoder;
 
-
-pub fn read_vcf_gz(file_path: &str) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
+pub fn read_vcf_gz(
+    file_path: &str,
+) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
     let file = File::open(file_path)?;
-    println!("File {} opened successfully", file_path);
+    println!("File {file_path} opened successfully");
+    //println!("File {} opened successfully", file_path);
 
     let reader: Box<dyn BufRead> = if file_path.ends_with(".gz") {
         // Handle gzip compressed files
@@ -42,10 +44,10 @@ pub fn read_vcf_gz(file_path: &str) -> Result<(String, String, Vec<String>), Box
         }
     }
 
-    println!("Total lines read: {}", line_count);
+    //println!("Total lines read: {}", line_count);
+    println!("Total lines read: {line_count}");
     println!("Header lines: {}", header.matches('\n').count());
     println!("Data lines: {}", data_lines.len());
 
     Ok((header, columns_title, data_lines))
 }
-
