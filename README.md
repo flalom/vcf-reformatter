@@ -25,15 +25,22 @@ Also incredibly useful for quick checks to your data!
 
 ## 🚀 Quick Start
 
-``` bash
-# Install and run in seconds
+```` bash
+# Download binary from releases (easiest! You download and use it)
+wget https://github.com/flalom/vcf-reformatter/releases/latest/download/vcf-reformatter-v0.1.0-linux-x86_64
+chmod +x vcf-reformatter-v0.1.0-linux-x86_64
+
+# Transform your VCF file  
+./vcf-reformatter-v0.1.0-linux-x86_64 sample.vcf.gz
+````
+OR build from source (you need Rust toolchain):
+```` bash
 git clone https://github.com/flalom/vcf-reformatter.git
 cd vcf-reformatter
 cargo build --release
-
-# Transform your VCF file
 ./target/release/vcf-reformatter sample.vcf.gz
-```
+````
+
 ## 🎯 Why VCF Reformatter?
 
 **The Problem:** VCF files are notoriously difficult to analyze. Complex nested annotations, semicolon-separated INFO fields, and multi-transcript VEP annotations make downstream analysis a nightmare.
@@ -67,16 +74,35 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 
 ## 📦 Installation
 
-### Option 1: Build from Source (Recommended)
-``` bash
+### Option 1: Download Pre-compiled Binaries (Easiest!)
+**No Rust installation required** - just download and run:
+
+1. **Go to [Releases](https://github.com/flalom/vcf-reformatter/releases/latest)**
+2. **Download the binary for your platform:**
+    - `vcf-reformatter-v0.1.0-linux-x86_64` → **Linux** (most users)
+    - `vcf-reformatter-v0.1.0-linux-x86_64-static` → **HPC clusters** (works everywhere)
+    - `vcf-reformatter-v0.1.0-windows-x86_64.exe` → **Windows**
+    - `vcf-reformatter-v0.1.0-macos-x86_64` → **Intel Mac**
+    - `vcf-reformatter-v0.1.0-macos-arm64` → **Apple Silicon Mac** (M1/M2/M3/M4)
+
+3. **Make executable and run:**
+````bash
+# Linux/Mac
+chmod +x vcf-reformatter-*
+./vcf-reformatter-* --help
+
+# Windows
+# Just double-click or run from command prompt
+````
+
+### Option 2: **Build from Source**
+````bash
 git clone https://github.com/flalom/vcf-reformatter.git
 cd vcf-reformatter
 cargo build --release
+````
 
-# Add to PATH for global access
-sudo cp target/release/vcf-reformatter /usr/local/bin/
-```
-### Option 2: Docker
+### Option 3: Docker
 ```shell script
 # Build the container
 docker build -t vcf-reformatter .
@@ -84,7 +110,7 @@ docker build -t vcf-reformatter .
 # Run with your data
 docker run --rm -v $(pwd):/data vcf-reformatter /data/sample.vcf.gz
 ```
-### Option 3: Singularity
+### Option 4: Singularity
 ```shell script
 # Build Singularity image
 singularity build vcf-reformatter.sif Singularity
@@ -269,6 +295,11 @@ singularity run \
 | **Transcript Studies** | `vcf-reformatter genes.vcf.gz -t split -v` | Comprehensive transcript-level analysis |
 | **Quick Data Exploration** | `vcf-reformatter sample.vcf.gz` | Simple, fast conversion for immediate analysis |
 | **HPC Batch Processing** | `vcf-reformatter huge.vcf.gz -t most-severe -j 32 -c` | Optimized for high-performance computing |
+
+## TODOs
+- Add SnpEff support
+- Output MAF format option
+- Add filtering capabilities (quality, frequency thresholds)
 
 ## 🤝 Contributing
 
