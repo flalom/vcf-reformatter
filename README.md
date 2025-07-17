@@ -66,7 +66,7 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 | 🧬 **VEP Annotation Parsing** | Intelligent handling of CSQ annotations | No more manual parsing of complex VEP output         |
 | 🔀 **Smart Transcript Handling** | Most severe, first only, or split transcripts | Choose the analysis approach that fits your needs    |
 | 🚀 **Parallel Processing** | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
-| 📁 **Native Compression** | Direct `.vcf.gz` reading & gzip output | Seamless workflow with compressed/unconpressed files |
+| 📁 **Native Compression** | Direct `.vcf.gz` reading & gzip output | Seamless workflow with compressed/uncompressed files |
 | 🎯 **Production Ready** | Comprehensive error handling & logging | Reliable for automated pipelines                     |
 | 🐳 **Container Support** | Docker & Singularity ready | Deploy anywhere, from laptops to HPC clusters        |
 
