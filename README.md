@@ -2,7 +2,7 @@
 
 Did it ever happen that you had VCF files and you wanted to have a look at the data as you would do with a normal table? `VCF Reformatter` is here for your rescue!
 
-A Rust command-line tool for parsing and reformatting VCF (Variant Call Format) files, with special support for VEP (Variant Effect Predictor) annotations. This tool flattens complex VCF files into tab-separated values (TSV) format for easier downstream analysis.
+A Rust command-line tool for parsing and reformatting VCF (Variant Call Format) files, with support for VEP (Variant Effect Predictor) and SnpEff annotations. This tool flattens complex VCF files into tab-separated values (TSV) format for easier downstream analysis.
 Also incredibly useful for quick checks to your data!
 
 # VCF Reformatter
@@ -17,7 +17,7 @@ Also incredibly useful for quick checks to your data!
 
 **Transform complex VCF files into clean, analyzable tables with ease**
 
-*A high-performance Rust tool for flattening VCF files with intelligent VEP annotation handling*
+*A high-performance Rust tool for flattening VCF files with intelligent VEP and SnpEff annotation handling*
 
 </div>
 
@@ -27,11 +27,11 @@ Also incredibly useful for quick checks to your data!
 
 ```` bash
 # Download binary from releases (easiest! You download and use it)
-wget https://github.com/flalom/vcf-reformatter/releases/latest/download/vcf-reformatter-v0.1.0-linux-x86_64
-chmod +x vcf-reformatter-v0.1.0-linux-x86_64
+wget https://github.com/flalom/vcf-reformatter/releases/latest/download/vcf-reformatter-v0.2.0-linux-x86_64
+chmod +x vcf-reformatter-v0.2.0-linux-x86_64
 
 # Transform your VCF file  
-./vcf-reformatter-v0.1.0-linux-x86_64 sample.vcf.gz
+./vcf-reformatter-v0.2.0-linux-x86_64 sample.vcf.gz
 ````
 OR build from source (you need Rust toolchain):
 ```` bash
@@ -61,14 +61,15 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 
 ## ✨ Key Features
 
-| Feature | Description | Benefit                                              |
-|---------|-------------|------------------------------------------------------|
-| 🧬 **VEP Annotation Parsing** | Intelligent handling of CSQ annotations | No more manual parsing of complex VEP output         |
-| 🔀 **Smart Transcript Handling** | Most severe, first only, or split transcripts | Choose the analysis approach that fits your needs    |
-| 🚀 **Parallel Processing** | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
-| 📁 **Native Compression** | Direct `.vcf.gz` reading & gzip output | Seamless workflow with compressed/uncompressed files |
-| 🎯 **Production Ready** | Comprehensive error handling & logging | Reliable for automated pipelines                     |
-| 🐳 **Container Support** | Docker & Singularity ready | Deploy anywhere, from laptops to HPC clusters        |
+| Feature                                 | Description                                      | Benefit                                              |
+|-----------------------------------------|--------------------------------------------------|------------------------------------------------------|
+| 🧬 **VEP/SnpEff Annotation Parsing**    | Intelligent handling of CSQ/ANN annotations      | No more manual parsing of complex VEP/SnpEff output  |
+| 👀 **Automatic Annotation Recognition** | Automatic detection of CSQ/ANN annotations       | Saving even more time now for both VEP and SnpEff    |
+| 🔀 **Smart Transcript Handling**        | Most severe, first only, or split transcripts    | Choose the analysis approach that fits your needs    |
+| 🚀 **Parallel Processing**              | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
+| 📁 **Native Compression**               | Direct `.vcf.gz` reading & gzip output           | Seamless workflow with compressed/uncompressed files |
+| 🎯 **Production Ready**                 | Comprehensive error handling & logging           | Reliable for automated pipelines                     |
+| 🐳 **Container Support**                | Docker & Singularity ready                       | Deploy anywhere, from laptops to HPC clusters        |
 
 ---
 
@@ -79,11 +80,11 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 
 1. **Go to [Releases](https://github.com/flalom/vcf-reformatter/releases/latest)**
 2. **Download the binary for your platform:**
-    - `vcf-reformatter-v0.1.0-linux-x86_64` → **Linux** (most users)
-    - `vcf-reformatter-v0.1.0-linux-x86_64-static` → **HPC clusters** (works everywhere)
-    - `vcf-reformatter-v0.1.0-windows-x86_64.exe` → **Windows**
-    - `vcf-reformatter-v0.1.0-macos-x86_64` → **Intel Mac**
-    - `vcf-reformatter-v0.1.0-macos-arm64` → **Apple Silicon Mac** (M1/M2/M3/M4)
+    - `vcf-reformatter-v0.2.0-linux-x86_64` → **Linux** (most users)
+    - `vcf-reformatter-v0.2.0-linux-x86_64-static` → **HPC clusters** (works everywhere)
+    - `vcf-reformatter-v0.2.0-windows-x86_64.exe` → **Windows**
+    - `vcf-reformatter-v0.2.0-macos-x86_64` → **Intel Mac**
+    - `vcf-reformatter-v0.2.0-macos-arm64` → **Apple Silicon Mac** (M1/M2/M3/M4)
 
 3. **Make executable and run:**
 ````bash
@@ -93,6 +94,7 @@ chmod +x vcf-reformatter-*
 
 # Windows
 # Just double-click or run from command prompt
+# C++ might be required, if not already installed
 ````
 
 ### Option 2: **Build from Source**
@@ -132,6 +134,17 @@ vcf-reformatter input.vcf.gz -t most-severe
 # All transcripts in separate rows (comprehensive)
 vcf-reformatter input.vcf.gz -t split
 ```
+### Annotation Type Detection
+```shell script
+# Auto-detect annotation type (recommended)
+vcf-reformatter input.vcf.gz -a auto
+
+# Force VEP processing
+vcf-reformatter vep_annotated.vcf.gz -a vep -t most-severe
+
+# Force SnpEff processing  
+vcf-reformatter snpeff_annotated.vcf.gz -a snpeff -t most-severe
+```
 ### Advanced Usage
 ```shell script
 # High-performance processing with compression
@@ -157,6 +170,9 @@ Options:
   -t, --transcript-handling <MODE>  How to handle multiple transcripts
                                    [default: first]
                                    [values: most-severe, first, split]
+  -a, --annotation-type <N>        Which annotations to parse VEP/SnpEff
+                                   [default: auto]
+                                   [values: snpeff, vep, auto]
   -j, --threads <N>                Thread count (0 = auto-detect) [default: 1]
   -o, --output-dir <DIR>           Output directory [default: current]
   -p, --prefix <PREFIX>            Output file prefix [default: input filename]
@@ -222,13 +238,21 @@ VCF Reformatter generates two files:
 1. **Standard VCF**: `CHROM`, `POS`, `ID`, `REF`, `ALT`, `QUAL`, `FILTER`
 2. **INFO Fields**: `INFO_DP`, `INFO_AF`, `INFO_AC`, etc.
 3. **VEP Annotations**: `CSQ_Allele`, `CSQ_Consequence`, `CSQ_SYMBOL`, `CSQ_Gene`, etc.
+3. **SnpEff Annotations**: `ANN_Allele`, `ANN_Annotation_Impact`, `ANN_Gene_Name`, `ANN_Distance`, etc.
 4. **Sample Data**: `SAMPLE1_GT`, `SAMPLE1_DP`, `SAMPLE1_AD`, etc.
 
-### Example Output
+### Example Output VEP
 ```
 CHROM  POS    ID     REF  ALT  QUAL     FILTER  INFO_DP  CSQ_Consequence      CSQ_SYMBOL  SAMPLE1_GT
 chr1   69511  .      A    G    1294.53  PASS    65       missense_variant     OR4F5       1/1
 chr1   69761  rs123  C    T    892.15   PASS    42       synonymous_variant   OR4F5       0/1
+```
+
+### Example Output SnpEff
+```
+CHROM  POS    ID     REF  ALT  QUAL     FILTER  INFO_DP  ANN_Annotation          ANN_Gene_Name  SAMPLE1_GT
+chr1   69761  rs587   C    T  730  PASS   .     214      synonymous_variant      OR4F5          0/1
+chr1   924024  .      A    G  53   PASS   .     409      5_prime_UTR_variant     SAMD11         1/1
 ```
 
 ## 🔧 Integration Examples
@@ -296,10 +320,15 @@ singularity run \
 | **Quick Data Exploration** | `vcf-reformatter sample.vcf.gz` | Simple, fast conversion for immediate analysis |
 | **HPC Batch Processing** | `vcf-reformatter huge.vcf.gz -t most-severe -j 32 -c` | Optimized for high-performance computing |
 
+## 🚀 What's New in v0.2.0
++ - ✅ **SnpEff Support** - Full ANN field parsing with intelligent detection
++ - ✅ **Smart Auto-Detection** - Automatically identifies VEP vs SnpEff annotations
++ - ✅ **Enhanced Error Handling** - Better processing of malformed or headerless files
+
 ## TODOs
-- Add SnpEff support
+- ~~Add SnpEff support✅~~
 - Output MAF format option
-- Add filtering capabilities (quality, frequency thresholds)
+- Add `stdin` to combine with other tools, such as `bcftools`
 
 ## 🤝 Contributing
 

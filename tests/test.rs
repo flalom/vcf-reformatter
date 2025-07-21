@@ -6,14 +6,17 @@ use tempfile::tempdir;
 use vcf_reformatter::{
     essentials_fields::VcfVariant,
     extract_csq_and_csq_names::extract_csq_regex,
-    extract_sample_info::{parse_format_and_samples, ParsedFormatSample, SampleData},
-    get_info_from_header::{extract_all_info_descriptions, extract_csq_format_from_header},
+    //extract_ann_and_ann_names::extract_ann_regex,
+    extract_sample_info::{parse_format_and_samples, ParsedFormatSample, _SampleData},
+    get_info_from_header::{_extract_all_info_descriptions, extract_csq_format_from_header},
     read_vcf_gz::read_vcf_gz,
     reformat_vcf::{
-        reformat_vcf_data_with_header, reformat_vcf_data_with_header_parallel,
-        write_reformatted_vcf, ReformattedVcfRecord, TranscriptHandling,
+        get_ann_impact_severity, parse_info_field, reformat_vcf_data_with_header,
+        reformat_vcf_data_with_header_parallel, sanitize_field_name, write_reformatted_vcf,
+        ReformattedVcfRecord, TranscriptHandling,
     },
 };
+
 // ------------------------------------------------------------------------------
 // Tests for read_vcf_gz.rs
 // ------------------------------------------------------------------------------
@@ -299,7 +302,7 @@ fn test_extract_all_info_descriptions() {
 ##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency">
 ##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">"#;
 
-    let result = extract_all_info_descriptions(header);
+    let result = _extract_all_info_descriptions(header);
 
     assert_eq!(result.len(), 3);
     assert_eq!(result.get("DP").unwrap(), "Total Depth");
@@ -312,7 +315,7 @@ fn test_extract_all_info_descriptions_no_info() {
     let header = r#"##fileformat=VCFv4.2
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">"#;
 
-    let result = extract_all_info_descriptions(header);
+    let result = _extract_all_info_descriptions(header);
     assert!(result.is_empty());
 }
 
@@ -382,7 +385,7 @@ fn test_get_headers_for_samples() {
     let mut parsed = ParsedFormatSample::new();
     parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
 
-    let mut sample1 = SampleData::new("SAMPLE1".to_string());
+    let mut sample1 = _SampleData::_new("SAMPLE1".to_string());
     sample1
         .format_fields
         .insert("GT".to_string(), "0/1".to_string());
@@ -390,7 +393,7 @@ fn test_get_headers_for_samples() {
         .format_fields
         .insert("DP".to_string(), "20".to_string());
 
-    let mut sample2 = SampleData::new("SAMPLE2".to_string());
+    let mut sample2 = _SampleData::_new("SAMPLE2".to_string());
     sample2
         .format_fields
         .insert("GT".to_string(), "1/1".to_string());
@@ -412,7 +415,7 @@ fn test_get_values_for_samples() {
     let mut parsed = ParsedFormatSample::new();
     parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
 
-    let mut sample1 = SampleData::new("SAMPLE1".to_string());
+    let mut sample1 = _SampleData::_new("SAMPLE1".to_string());
     sample1
         .format_fields
         .insert("GT".to_string(), "0/1".to_string());
@@ -420,7 +423,7 @@ fn test_get_values_for_samples() {
         .format_fields
         .insert("DP".to_string(), "20".to_string());
 
-    let mut sample2 = SampleData::new("SAMPLE2".to_string());
+    let mut sample2 = _SampleData::_new("SAMPLE2".to_string());
     sample2
         .format_fields
         .insert("GT".to_string(), "1/1".to_string());
@@ -430,7 +433,7 @@ fn test_get_values_for_samples() {
 
     parsed.samples = vec![sample1, sample2];
 
-    let values = parsed.get_values_for_samples();
+    let values = parsed._get_values_for_samples();
     assert_eq!(values, vec!["0/1", "20", "1/1", "30"]);
 }
 
@@ -773,7 +776,7 @@ fn test_complex_sample_names_value_extraction() {
     let sample_names = vec!["B487_B487_1_cOM".to_string(), "B487_B487_2_LN".to_string()];
 
     let parsed = parse_format_and_samples(format, &sample_fields, &sample_names).unwrap();
-    let values = parsed.get_values_for_samples();
+    let values = parsed._get_values_for_samples();
 
     // Expected values in the same order as headers
     let expected_values = vec![
@@ -792,7 +795,7 @@ fn test_vcf_record_with_complex_sample_names() {
     let vcf_line = "chr1\t123456\t.\tA\tG\t1000\tPASS\tDP=570;AF=0.5\tGT:AD:AF:DP:F1R2:F2R1:FAD:SB\t0/0:257,4:0.017:261:109,0:87,3:229,3:164,93,3,1\t0/1:303,6:0.020:309:105,3:106,1:245,4:187,116,2,4";
 
     let column_names = vec![
-        "#CHROM",
+        "CHROM",
         "POS",
         "ID",
         "REF",
@@ -808,8 +811,9 @@ fn test_vcf_record_with_complex_sample_names() {
     let records = ReformattedVcfRecord::from_vcf_line(
         vcf_line,
         &column_names,
-        &None,
-        TranscriptHandling::FirstOnly,
+        &None,                         // csq_field_names
+        &None,                         // ann_field_names
+        TranscriptHandling::FirstOnly, // transcript_handling
     )
     .unwrap();
 
@@ -865,7 +869,7 @@ fn test_tsv_output_with_complex_sample_names() {
         "DP".to_string(),
     ];
 
-    let mut sample1 = ParsedSample::new("B487_B487_1_cOM".to_string());
+    let mut sample1 = ParsedSample::_new("B487_B487_1_cOM".to_string());
     sample1
         .format_fields
         .insert("GT".to_string(), "0/0".to_string());
@@ -879,7 +883,7 @@ fn test_tsv_output_with_complex_sample_names() {
         .format_fields
         .insert("DP".to_string(), "261".to_string());
 
-    let mut sample2 = ParsedSample::new("B487_B487_2_LN".to_string());
+    let mut sample2 = ParsedSample::_new("B487_B487_2_LN".to_string());
     sample2
         .format_fields
         .insert("GT".to_string(), "0/1".to_string());
@@ -1001,4 +1005,505 @@ fn test_edge_case_sample_names_with_multiple_underscores() {
         "FINAL_TEST_SAMPLE_NAME_3_DP",
     ];
     assert_eq!(headers, expected_headers);
+}
+
+#[test]
+fn test_parse_info_field_empty() {
+    let result = parse_info_field("", &None, &None, TranscriptHandling::FirstOnly);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().len(), 1);
+}
+
+#[test]
+fn test_parse_info_field_no_annotations() {
+    let csq_fields = None;
+    let ann_fields = None;
+    let result = parse_info_field(
+        "DP=10;AF=0.5",
+        &csq_fields,
+        &ann_fields,
+        TranscriptHandling::FirstOnly,
+    );
+
+    assert!(result.is_ok());
+    let records = result.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].get("INFO_DP"), Some(&"10".to_string()));
+    assert_eq!(records[0].get("INFO_AF"), Some(&"0.5".to_string()));
+}
+
+#[test]
+fn test_parse_info_field_with_csq() {
+    let csq_fields = Some(vec!["Allele".to_string(), "Consequence".to_string()]);
+    let ann_fields = None;
+    let result = parse_info_field(
+        "DP=10;CSQ=A|missense_variant,T|synonymous_variant;AF=0.5",
+        &csq_fields,
+        &ann_fields,
+        TranscriptHandling::SplitRows,
+    );
+
+    assert!(result.is_ok());
+    let records = result.unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].get("CSQ_Allele"), Some(&"A".to_string()));
+    assert_eq!(
+        records[0].get("CSQ_Consequence"),
+        Some(&"missense_variant".to_string())
+    );
+    assert_eq!(records[0].get("INFO_DP"), Some(&"10".to_string()));
+}
+
+#[test]
+fn test_sanitize_field_name() {
+    assert_eq!(sanitize_field_name("HGVS.c"), "HGVS_c");
+    assert_eq!(
+        sanitize_field_name("cDNA.pos / cDNA.length"),
+        "cDNA_pos___cDNA_length"
+    );
+    assert_eq!(sanitize_field_name("normal_name"), "normal_name");
+    assert_eq!(sanitize_field_name(""), "");
+}
+
+#[test]
+fn test_get_ann_impact_severity() {
+    assert_eq!(get_ann_impact_severity("HIGH"), 4);
+    assert_eq!(get_ann_impact_severity("MODERATE"), 3);
+    assert_eq!(get_ann_impact_severity("LOW"), 2);
+    assert_eq!(get_ann_impact_severity("MODIFIER"), 1);
+    assert_eq!(get_ann_impact_severity("UNKNOWN"), 0);
+}
+
+#[test]
+fn test_parse_info_field_with_ann() {
+    let csq_fields = None;
+    let ann_fields = Some(vec![
+        "Allele".to_string(),
+        "Annotation".to_string(),
+        "Annotation_Impact".to_string(),
+        "Gene_Name".to_string(),
+    ]);
+    let result = parse_info_field(
+        "DP=15;ANN=T|missense_variant|MODERATE|BRCA1,G|synonymous_variant|LOW|TP53;AF=0.3",
+        &csq_fields,
+        &ann_fields,
+        TranscriptHandling::SplitRows,
+    );
+
+    assert!(result.is_ok());
+    let records = result.unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].get("ANN_Allele"), Some(&"T".to_string()));
+    assert_eq!(
+        records[0].get("ANN_Annotation"),
+        Some(&"missense_variant".to_string())
+    );
+    assert_eq!(
+        records[0].get("ANN_Annotation_Impact"),
+        Some(&"MODERATE".to_string())
+    );
+    assert_eq!(records[0].get("ANN_Gene_Name"), Some(&"BRCA1".to_string()));
+    assert_eq!(records[0].get("INFO_DP"), Some(&"15".to_string()));
+    assert_eq!(records[0].get("INFO_AF"), Some(&"0.3".to_string()));
+}
+
+//############# add tests for snpeff
+#[test]
+fn test_snpeff_ann_parsing_basic() {
+    use vcf_reformatter::reformat_vcf::{ReformattedVcfRecord, TranscriptHandling};
+
+    let vcf_line = "chr1\t100\t.\tA\tG\t60\tPASS\tANN=G|missense_variant|MODERATE|BRCA1|ENSG00000012048|transcript|ENST00000357654|protein_coding|5/24|c.181T>C|p.Cys61Arg|181/5592|181/4863|61/1620||\tGT\t0/1";
+
+    let column_names = vec![
+        "CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "SAMPLE1",
+    ];
+
+    // Define ANN field names as they would be extracted from header
+    let ann_field_names = Some(vec![
+        "Allele".to_string(),
+        "Annotation".to_string(),
+        "Annotation_Impact".to_string(),
+        "Gene_Name".to_string(),
+        "Gene_ID".to_string(),
+        "Feature_Type".to_string(),
+        "Feature_ID".to_string(),
+        "Transcript_BioType".to_string(),
+        "Rank".to_string(),
+        "HGVS.c".to_string(),
+        "HGVS.p".to_string(),
+        "cDNA.pos / cDNA.length".to_string(),
+        "CDS.pos / CDS.length".to_string(),
+        "AA.pos / AA.length".to_string(),
+        "Distance".to_string(),
+    ]);
+
+    let records = ReformattedVcfRecord::from_vcf_line(
+        vcf_line,
+        &column_names,
+        &None, // csq_field_names
+        &ann_field_names,
+        TranscriptHandling::FirstOnly,
+    )
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+
+    // Verify ANN fields are properly parsed
+    assert_eq!(record.info_fields.get("ANN_Allele"), Some(&"G".to_string()));
+    assert_eq!(
+        record.info_fields.get("ANN_Annotation"),
+        Some(&"missense_variant".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_Annotation_Impact"),
+        Some(&"MODERATE".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_Gene_Name"),
+        Some(&"BRCA1".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_Gene_ID"),
+        Some(&"ENSG00000012048".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_Feature_ID"),
+        Some(&"ENST00000357654".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_HGVS_c"),
+        Some(&"c.181T>C".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_HGVS_p"),
+        Some(&"p.Cys61Arg".to_string())
+    );
+}
+
+#[test]
+fn test_snpeff_ann_multiple_transcripts_split_rows() {
+    use vcf_reformatter::reformat_vcf::{ReformattedVcfRecord, TranscriptHandling};
+
+    let vcf_line = "chr1\t100\t.\tA\tG\t60\tPASS\tANN=G|missense_variant|MODERATE|BRCA1|ENSG00000012048|transcript|ENST00000357654|protein_coding|5/24|c.181T>C|p.Cys61Arg||||,G|synonymous_variant|LOW|BRCA1|ENSG00000012048|transcript|ENST00000123456|protein_coding|6/25|c.200A>G|p.Leu67Leu||||";
+
+    let column_names = vec!["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"];
+
+    let ann_field_names = Some(vec![
+        "Allele".to_string(),
+        "Annotation".to_string(),
+        "Annotation_Impact".to_string(),
+        "Gene_Name".to_string(),
+        "Gene_ID".to_string(),
+        "Feature_Type".to_string(),
+        "Feature_ID".to_string(),
+        "Transcript_BioType".to_string(),
+        "Rank".to_string(),
+        "HGVS.c".to_string(),
+        "HGVS.p".to_string(),
+        "cDNA.pos / cDNA.length".to_string(),
+        "CDS.pos / CDS.length".to_string(),
+        "AA.pos / AA.length".to_string(),
+        "Distance".to_string(),
+    ]);
+
+    let records = ReformattedVcfRecord::from_vcf_line(
+        vcf_line,
+        &column_names,
+        &None,
+        &ann_field_names,
+        TranscriptHandling::SplitRows, // create separate records?
+    )
+    .unwrap();
+
+    assert_eq!(records.len(), 2);
+
+    // First record - missense variant
+    assert_eq!(
+        records[0].info_fields.get("ANN_Annotation"),
+        Some(&"missense_variant".to_string())
+    );
+    assert_eq!(
+        records[0].info_fields.get("ANN_Annotation_Impact"),
+        Some(&"MODERATE".to_string())
+    );
+    assert_eq!(
+        records[0].info_fields.get("ANN_Feature_ID"),
+        Some(&"ENST00000357654".to_string())
+    );
+
+    // Second record - synonymous variant
+    assert_eq!(
+        records[1].info_fields.get("ANN_Annotation"),
+        Some(&"synonymous_variant".to_string())
+    );
+    assert_eq!(
+        records[1].info_fields.get("ANN_Annotation_Impact"),
+        Some(&"LOW".to_string())
+    );
+    assert_eq!(
+        records[1].info_fields.get("ANN_Feature_ID"),
+        Some(&"ENST00000123456".to_string())
+    );
+}
+
+#[test]
+fn test_snpeff_ann_most_severe_selection() {
+    use vcf_reformatter::reformat_vcf::{ReformattedVcfRecord, TranscriptHandling};
+
+    let vcf_line = "chr1\t100\t.\tA\tG\t60\tPASS\tANN=G|synonymous_variant|LOW|BRCA1||||||||||||,G|missense_variant|MODERATE|BRCA1||||||||||||,G|stop_gained|HIGH|BRCA1||||||||||||";
+
+    let column_names = vec!["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"];
+
+    let ann_field_names = Some(vec![
+        "Allele".to_string(),
+        "Annotation".to_string(),
+        "Annotation_Impact".to_string(),
+        "Gene_Name".to_string(),
+        "Gene_ID".to_string(),
+        "Feature_Type".to_string(),
+        "Feature_ID".to_string(),
+        "Transcript_BioType".to_string(),
+        "Rank".to_string(),
+        "HGVS.c".to_string(),
+        "HGVS.p".to_string(),
+        "cDNA.pos / cDNA.length".to_string(),
+        "CDS.pos / CDS.length".to_string(),
+        "AA.pos / AA.length".to_string(),
+        "Distance".to_string(),
+    ]);
+
+    let records = ReformattedVcfRecord::from_vcf_line(
+        vcf_line,
+        &column_names,
+        &None,
+        &ann_field_names,
+        TranscriptHandling::MostSevere, // should select the HIGH impact variant
+    )
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+
+    // select the stop_gained variant (HIGH impact)
+    assert_eq!(
+        records[0].info_fields.get("ANN_Annotation"),
+        Some(&"stop_gained".to_string())
+    );
+    assert_eq!(
+        records[0].info_fields.get("ANN_Annotation_Impact"),
+        Some(&"HIGH".to_string())
+    );
+}
+
+#[test]
+fn test_snpeff_ann_impact_severity_ranking() {
+    use vcf_reformatter::reformat_vcf::get_ann_impact_severity;
+
+    // the severity function
+    assert_eq!(get_ann_impact_severity("HIGH"), 4);
+    assert_eq!(get_ann_impact_severity("MODERATE"), 3);
+    assert_eq!(get_ann_impact_severity("LOW"), 2);
+    assert_eq!(get_ann_impact_severity("MODIFIER"), 1);
+    assert_eq!(get_ann_impact_severity("UNKNOWN"), 0);
+
+    // Test case insensitivity
+    assert_eq!(get_ann_impact_severity("high"), 4);
+    assert_eq!(get_ann_impact_severity("moderate"), 3);
+
+    // Test with whitespace
+    assert_eq!(get_ann_impact_severity(" HIGH "), 4);
+}
+
+#[test]
+fn test_vep_and_snpeff_field_name_sanitization() {
+    use vcf_reformatter::reformat_vcf::sanitize_field_name;
+
+    // Test VEP field name sanitization
+    assert_eq!(sanitize_field_name("HGVS.c"), "HGVS_c");
+    assert_eq!(sanitize_field_name("HGVS.p"), "HGVS_p");
+
+    // Test SnpEff field name sanitization
+    assert_eq!(
+        sanitize_field_name("cDNA.pos / cDNA.length"),
+        "cDNA_pos___cDNA_length"
+    );
+    assert_eq!(
+        sanitize_field_name("CDS.pos / CDS.length"),
+        "CDS_pos___CDS_length"
+    );
+    assert_eq!(
+        sanitize_field_name("AA.pos / AA.length"),
+        "AA_pos___AA_length"
+    );
+
+    // Test other special characters
+    assert_eq!(
+        sanitize_field_name("ERRORS / WARNINGS / INFO"),
+        "ERRORS___WARNINGS___INFO"
+    );
+
+    // Test normal names
+    assert_eq!(sanitize_field_name("Gene_Name"), "Gene_Name");
+    assert_eq!(sanitize_field_name("Allele"), "Allele");
+}
+
+#[test]
+fn test_mixed_info_fields_with_ann() {
+    use vcf_reformatter::reformat_vcf::{ReformattedVcfRecord, TranscriptHandling};
+
+    let vcf_line = "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;AF=0.25;ANN=G|missense_variant|MODERATE|BRCA1||||||||||||;AC=2;AN=4\tGT\t0/1";
+
+    let column_names = vec![
+        "CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "SAMPLE1",
+    ];
+
+    let ann_field_names = Some(vec![
+        "Allele".to_string(),
+        "Annotation".to_string(),
+        "Annotation_Impact".to_string(),
+        "Gene_Name".to_string(),
+    ]);
+
+    let records = ReformattedVcfRecord::from_vcf_line(
+        vcf_line,
+        &column_names,
+        &None,
+        &ann_field_names,
+        TranscriptHandling::FirstOnly,
+    )
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+
+    // Verify both INFO and ANN fields are present
+    assert_eq!(record.info_fields.get("INFO_DP"), Some(&"50".to_string()));
+    assert_eq!(record.info_fields.get("INFO_AF"), Some(&"0.25".to_string()));
+    assert_eq!(record.info_fields.get("INFO_AC"), Some(&"2".to_string()));
+    assert_eq!(record.info_fields.get("INFO_AN"), Some(&"4".to_string()));
+
+    assert_eq!(record.info_fields.get("ANN_Allele"), Some(&"G".to_string()));
+    assert_eq!(
+        record.info_fields.get("ANN_Annotation"),
+        Some(&"missense_variant".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_Annotation_Impact"),
+        Some(&"MODERATE".to_string())
+    );
+    assert_eq!(
+        record.info_fields.get("ANN_Gene_Name"),
+        Some(&"BRCA1".to_string())
+    );
+}
+
+#[test]
+fn test_real_world_snpeff_header_extraction() {
+    use vcf_reformatter::get_info_from_header::extract_ann_format_from_header;
+
+    let header = r#"##fileformat=VCFv4.2
+##INFO=<ID=ANN,Number=.,Type=String,Description="Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">"#;
+
+    let ann_format = extract_ann_format_from_header(header);
+    assert!(ann_format.is_some());
+
+    let fields = ann_format.unwrap();
+    assert_eq!(fields.len(), 16);
+    assert_eq!(fields[0], "Allele");
+    assert_eq!(fields[1], "Annotation");
+    assert_eq!(fields[2], "Annotation_Impact");
+    assert_eq!(fields[3], "Gene_Name");
+    assert_eq!(fields[9], "HGVS.c");
+    assert_eq!(fields[10], "HGVS.p");
+    assert_eq!(fields[11], "cDNA.pos / cDNA.length");
+    assert_eq!(fields[15], "ERRORS / WARNINGS / INFO");
+}
+
+#[test]
+fn test_full_pipeline_with_snpeff_data() {
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
+
+    let header = r#"##fileformat=VCFv4.2
+##INFO=<ID=ANN,Number=.,Type=String,Description="Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">"#;
+
+    let column_names = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+
+    let data_lines = vec![
+        "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;ANN=G|missense_variant|MODERATE|BRCA1|ENSG00000012048|transcript|ENST00000357654|protein_coding|5/24|c.181T>C|p.Cys61Arg|181/5592|181/4863|61/1620||".to_string(),
+        "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG00000141510|transcript|ENST00000269305|protein_coding|7/11|c.916C>T|p.Arg306Ter|916/1182|916/1182|306/393||".to_string()
+    ];
+
+    let result = reformat_vcf_data_with_header(
+        header,
+        column_names,
+        &data_lines,
+        TranscriptHandling::FirstOnly,
+    );
+
+    assert!(result.is_ok());
+
+    let (headers, records) = result.unwrap();
+    assert_eq!(records.len(), 2);
+
+    // Check that headers include both INFO and ANN fields
+    assert!(headers.contains(&"INFO_DP".to_string()));
+    assert!(headers.contains(&"ANN_Allele".to_string()));
+    assert!(headers.contains(&"ANN_Annotation".to_string()));
+    assert!(headers.contains(&"ANN_Gene_Name".to_string()));
+    assert!(headers.contains(&"ANN_HGVS_c".to_string()));
+
+    // Verify first record (BRCA1 missense)
+    assert_eq!(records[0].chromosome, "chr1");
+    assert_eq!(
+        records[0].info_fields.get("ANN_Gene_Name"),
+        Some(&"BRCA1".to_string())
+    );
+    assert_eq!(
+        records[0].info_fields.get("ANN_Annotation"),
+        Some(&"missense_variant".to_string())
+    );
+
+    // Verify second record (TP53 stop_gained)
+    assert_eq!(records[1].chromosome, "chr2");
+    assert_eq!(
+        records[1].info_fields.get("ANN_Gene_Name"),
+        Some(&"TP53".to_string())
+    );
+    assert_eq!(
+        records[1].info_fields.get("ANN_Annotation"),
+        Some(&"stop_gained".to_string())
+    );
+}
+
+#[test]
+fn test_empty_ann_field_handling() {
+    use vcf_reformatter::reformat_vcf::{ReformattedVcfRecord, TranscriptHandling};
+
+    let vcf_line = "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;ANN=;AF=0.25";
+
+    let column_names = vec!["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"];
+
+    let ann_field_names = Some(vec!["Allele".to_string(), "Annotation".to_string()]);
+
+    let records = ReformattedVcfRecord::from_vcf_line(
+        vcf_line,
+        &column_names,
+        &None,
+        &ann_field_names,
+        TranscriptHandling::FirstOnly,
+    )
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+
+    // Should still have INFO fields
+    assert_eq!(record.info_fields.get("INFO_DP"), Some(&"50".to_string()));
+    assert_eq!(record.info_fields.get("INFO_AF"), Some(&"0.25".to_string()));
+
+    // Should not have ANN fields since ANN was empty
+    assert!(!record.info_fields.contains_key("ANN_Allele"));
+    assert!(!record.info_fields.contains_key("ANN_Annotation"));
 }

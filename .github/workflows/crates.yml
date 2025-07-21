@@ -1,0 +1,59 @@
+name: Publish to Crates.io
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: publish-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          CARGO_VERSION=$(cargo pkgid | cut -d'#' -f2 | cut -d'@' -f2)
+          TAG_VERSION=${{ github.ref_name }}
+          TAG_VERSION=${TAG_VERSION#v} 
+          
+          echo "📦 Cargo.toml version: $CARGO_VERSION"
+          echo "🏷️  Git tag version: $TAG_VERSION"
+          
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch! Cargo.toml has $CARGO_VERSION but tag is $TAG_VERSION"
+            exit 1
+          fi
+          
+          echo "✅ Versions match!"
+
+      - name: Run tests
+        run: cargo test --release
+
+      - name: Dry run publish
+        run: |
+          echo "🔍 Running publish dry run..."
+          cargo publish --dry-run
+
+      - name: Publish to crates.io
+        run: |
+          echo "🚀 Publishing to crates.io..."
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          echo "✅ Published successfully!"

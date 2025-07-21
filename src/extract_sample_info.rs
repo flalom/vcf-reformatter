@@ -25,6 +25,29 @@ impl ParsedFormatSample {
             samples: Vec::new(),
         }
     }
+    pub fn from_vcf_fields(
+        fields: &[&str],
+        column_names: &[&str],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if fields.is_empty() {
+            return Ok(Self::new());
+        }
+
+        let format_field = fields.first().copied();
+        let sample_fields: Vec<String> = fields.iter().skip(1).map(|s| s.to_string()).collect();
+
+        // Get sample names from column names, starting after the 9 standard VCF columns
+        let sample_names: Vec<String> = if column_names.len() > 9 {
+            column_names[9..].iter().map(|s| s.to_string()).collect()
+        } else {
+            // Generate default sample names if not provided
+            (0..sample_fields.len())
+                .map(|i| format!("SAMPLE_{}", i + 1))
+                .collect()
+        };
+
+        parse_format_and_samples(format_field, &sample_fields, &sample_names)
+    }
 
     pub fn get_headers_for_samples(&self) -> Vec<String> {
         let mut headers = Vec::new();
@@ -38,7 +61,7 @@ impl ParsedFormatSample {
         headers
     }
 
-    pub fn get_values_for_samples(&self) -> Vec<String> {
+    pub fn _get_values_for_samples(&self) -> Vec<String> {
         let mut values = Vec::new();
         let default_value = ".".to_string();
 
@@ -55,20 +78,20 @@ impl ParsedFormatSample {
         values
     }
 
-    pub fn get_all_format_keys(&self) -> Vec<String> {
+    pub fn _get_all_format_keys(&self) -> Vec<String> {
         self.format_keys.clone()
     }
 
-    pub fn get_sample_names(&self) -> Vec<String> {
+    pub fn _get_sample_names(&self) -> Vec<String> {
         self.samples.iter().map(|s| s.sample_name.clone()).collect()
     }
 }
 
 // Alias for backward compatibility with tests
-pub type SampleData = ParsedSample;
+pub type _SampleData = ParsedSample;
 
 impl ParsedSample {
-    pub fn new(sample_name: String) -> Self {
+    pub fn _new(sample_name: String) -> Self {
         ParsedSample {
             sample_name,
             format_fields: HashMap::new(),
@@ -143,7 +166,7 @@ mod tests {
         let mut parsed = ParsedFormatSample::new();
         parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
 
-        let mut sample1 = SampleData::new("SAMPLE1".to_string());
+        let mut sample1 = _SampleData::_new("SAMPLE1".to_string());
         sample1
             .format_fields
             .insert("GT".to_string(), "0/1".to_string());
@@ -151,7 +174,7 @@ mod tests {
             .format_fields
             .insert("DP".to_string(), "20".to_string());
 
-        let mut sample2 = SampleData::new("SAMPLE2".to_string());
+        let mut sample2 = _SampleData::_new("SAMPLE2".to_string());
         sample2
             .format_fields
             .insert("GT".to_string(), "1/1".to_string());

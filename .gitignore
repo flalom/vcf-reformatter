@@ -3,3 +3,5 @@ data/*
 target/*
 vcf_to_maf.Rproj
 vcf-reformatter
+.DS_Store
+._*

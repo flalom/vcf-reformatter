@@ -1,8 +1,23 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
+//! # VCF Reformatter
+//!
+//! A fast, parallel VCF (Variant Call Format) parser and reformatter for bioinformatics.
+//! Supports VEP and SnpEff annotations with configurable transcript handling.
+//!
+//! ## Quick Start
+//!
+//! ```bash
+//! # Basic usage with auto-detection
+//! vcf-reformatter sample.vcf.gz
+//!
+//! # Use VEP annotations with most severe consequence
+//! vcf-reformatter sample.vcf.gz -a vep -t most-severe -j 4
+//!
+//! # Use SnpEff annotations with all transcripts
+//! vcf-reformatter sample.vcf.gz -a snpeff -t split -o results/
+//! ```
 
 mod essentials_fields;
+mod extract_ann_and_ann_names;
 mod extract_csq_and_csq_names;
 mod extract_sample_info;
 mod get_info_from_header;
@@ -15,52 +30,42 @@ use std::io::{Result, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::essentials_fields::*;
-use crate::essentials_fields::*;
-use crate::extract_csq_and_csq_names::extract_csq_regex;
-use crate::extract_sample_info::*;
-use crate::extract_sample_info::*;
 use crate::read_vcf_gz::read_vcf_gz;
 use crate::reformat_vcf::{
     reformat_vcf_data_with_header, reformat_vcf_data_with_header_parallel, write_reformatted_vcf,
-    TranscriptHandling,
+    AnnotationType, TranscriptHandling,
 };
 
 #[derive(Parser)]
 #[command(
     name = "vcf-reformatter",
-    version = "0.1.0",
-    about = "🧬 Fast VCF file parser and reformatter with VEP annotation support",
-    long_about = "A Rust command-line tool for parsing and reformatting VCF (Variant Call Format) files, with special support for VEP (Variant Effect Predictor) annotations. This tool flattens complex VCF files into tab-separated values (TSV) format for easier downstream analysis.",
+    version = "0.2.0",
+    about = "🧬 Fast VCF file parser and reformatter with VEP and SnpEff annotation support",
+    long_about = "A Rust command-line tool for parsing and reformatting VCF (Variant Call Format) files, with support for VEP (Variant Effect Predictor) and SnpEff annotations. This tool flattens complex VCF files into tab-separated values (TSV) format for easier downstream analysis.",
     after_help = "EXAMPLES:
-    Basic usage:
+    Basic usage (auto-detect annotation type):
       vcf-reformatter sample.vcf.gz
 
-    Use most severe consequence with parallel processing:
-      vcf-reformatter sample.vcf.gz -t most-severe -j 4
+    Use VEP annotations with most severe consequence:
+      vcf-reformatter sample.vcf.gz -a vep -t most-severe -j 4
 
-    Split all transcripts with custom output:
-      vcf-reformatter sample.vcf.gz -t split -o results/ -p analysis
+    Use SnpEff annotations with all transcripts:
+      vcf-reformatter sample.vcf.gz -a snpeff -t split -o results/ -p analysis
 
-    Auto-detect threads with verbose output:
-      vcf-reformatter sample.vcf.gz -j 0 -v
+    Auto-detect annotation type with parallel processing:
+      vcf-reformatter sample.vcf.gz -a auto -j 0 -v
 
-    Compress output with gzip:
-      vcf-reformatter sample.vcf.gz -t most-severe -j 4 -o results/ -p pippo -v --compress
-
-    Complete example with all options:
-      vcf-reformatter sample.vcf.gz -t most-severe -j 4 -o results/ -p my_analysis -v --compress
-
-    Container usage:
-      docker run --rm -v $(pwd):/data vcf-reformatter /data/sample.vcf.gz -t split --compress
-
-    For more examples and documentation, visit:
-    https://github.com/flalom/vcf-reformatter"
+    Complete example with SnpEff and compression:
+      vcf-reformatter sample.vcf.gz -a snpeff -t most-severe -j 4 -o results/ -p my_analysis -v --compress"
 )]
 struct Cli {
     /// Input VCF file (supports .vcf.gz compressed files)
     #[arg(value_name = "INPUT_FILE")]
     input_file: String,
+
+    /// Annotation type to parse
+    #[arg(short = 'a', long = "annotation-type", value_enum, default_value_t = AnnotationTypeCli::Auto)]
+    annotation_type: AnnotationTypeCli,
 
     /// Transcript handling mode
     #[arg(short = 't', long = "transcript-handling", value_enum, default_value_t = TranscriptHandlingCli::FirstOnly)]
@@ -88,6 +93,19 @@ struct Cli {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum AnnotationTypeCli {
+    /// VEP annotations (CSQ field)
+    #[value(name = "vep")]
+    Vep,
+    /// SnpEff annotations (ANN field)
+    #[value(name = "snpeff")]
+    SnpEff,
+    /// Auto-detect from header
+    #[value(name = "auto")]
+    Auto,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum TranscriptHandlingCli {
     /// Extract only the most severe consequence for each variant
     #[value(name = "most-severe")]
@@ -98,6 +116,16 @@ enum TranscriptHandlingCli {
     /// Split every transcript into separate rows
     #[value(name = "split")]
     SplitRows,
+}
+
+impl From<AnnotationTypeCli> for AnnotationType {
+    fn from(cli: AnnotationTypeCli) -> Self {
+        match cli {
+            AnnotationTypeCli::Vep => AnnotationType::Vep,
+            AnnotationTypeCli::SnpEff => AnnotationType::SnpEff,
+            AnnotationTypeCli::Auto => AnnotationType::Auto,
+        }
+    }
 }
 
 impl From<TranscriptHandlingCli> for TranscriptHandling {
@@ -112,35 +140,42 @@ impl From<TranscriptHandlingCli> for TranscriptHandling {
 
 fn main() {
     let cli = Cli::parse();
-
     // Validate input file
     if !Path::new(&cli.input_file).exists() {
         eprintln!("❌ Error: File '{}' not found", cli.input_file);
         std::process::exit(1);
     }
-
     // Parse thread count
     let thread_count = if cli.threads == 0 {
         num_cpus::get()
     } else {
         cli.threads
     };
-
     let transcript_handling = TranscriptHandling::from(cli.transcript_handling);
+    let annotation_type = AnnotationType::from(cli.annotation_type);
     let use_parallel = thread_count > 1;
 
     // Start total timing
     let total_start = Instant::now();
 
     // Print startup information
-    print_startup_info(&cli, thread_count, use_parallel, transcript_handling);
+    print_startup_info(
+        &cli,
+        thread_count,
+        use_parallel,
+        transcript_handling,
+        annotation_type,
+    );
 
     // Set thread pool size if using parallel processing
     if use_parallel {
-        rayon::ThreadPoolBuilder::new()
+        if let Err(e) = rayon::ThreadPoolBuilder::new()
             .num_threads(thread_count)
             .build_global()
-            .unwrap();
+        {
+            eprintln!("⚠️  Warning: Could not set thread pool size: {e}");
+            eprintln!("   Continuing with default thread pool...");
+        }
     }
 
     // Read VCF file
@@ -153,8 +188,11 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let read_time = read_start.elapsed();
 
+    // use the function to tell the user if VEP or SNPEFF were detected
+    detect_and_print_annotation_type(&data.0, annotation_type);
+
+    let read_time = read_start.elapsed();
     println!("✅ File read completed in {read_time:.2?}");
     println!("   📊 Total variants: {}", data.2.len());
     println!("   📑 Header lines: {}", data.0.matches('\n').count());
@@ -163,7 +201,7 @@ fn main() {
     // Generate output filenames
     let (header_file, reformatted_file) = generate_output_filenames(&cli);
 
-    // Write heade file
+    // Write header file
     println!("📝 Writing header file...");
     let header_write_start = Instant::now();
     if let Err(e) = write_header_file(&header_file, &data.0, data.2.len()) {
@@ -177,16 +215,17 @@ fn main() {
     // Process VCF data
     println!("🔄 Processing VCF data...");
     let process_start = Instant::now();
-
     let result = if use_parallel {
         if cli.verbose {
             println!("   🚀 Using parallel processing with {thread_count} threads...");
         }
+        // Remove annotation_type parameter if function doesn't accept it
         reformat_vcf_data_with_header_parallel(&data.0, &data.1, &data.2, transcript_handling)
     } else {
         if cli.verbose {
             println!("   🐌 Using sequential processing...");
         }
+        // Remove annotation_type parameter if function doesn't accept it
         reformat_vcf_data_with_header(&data.0, &data.1, &data.2, transcript_handling)
     };
 
@@ -194,7 +233,6 @@ fn main() {
         Ok((headers, records)) => {
             let process_time = process_start.elapsed();
             let variants_per_sec = data.2.len() as f64 / process_time.as_secs_f64();
-
             println!("✅ Data processing completed in {process_time:.2?}");
             println!("   📈 Processing rate: {variants_per_sec:.0} variants/sec");
             println!(
@@ -224,7 +262,6 @@ fn main() {
             }
             let write_time = write_start.elapsed();
             let total_time = total_start.elapsed();
-
             println!(
                 "✅ Reformatted file written in {:.2?}{}",
                 write_time,
@@ -254,51 +291,6 @@ fn main() {
             std::process::exit(1);
         }
     }
-
-    /*
-        //println!("{:?}", data.1);
-        let first_char = data.1.chars().next().unwrap_or('?');
-        //println!("First character: {}", first_char);
-
-        let column_names: Vec<&str> = data.1.split('\t').collect();
-        //println!("Column names: {:?}", column_names);
-
-        // Parse first variant (correct syntax ✅)
-        let vcf_variant = VcfVariant::from_line(&data.2[0], &column_names).unwrap();
-        //println!("First variant: {:?}", vcf_variant);
-        //println!("Reference: {:?}", vcf_variant.reference);
-        //println!("Alternative: {:?}", vcf_variant.alternate);
-
-        // Split ALL data lines by tabs
-        let mut all_parsed_lines: Vec<Vec<&str>> = data.2
-            .iter()
-            .map(|line| line.split('\t').collect())
-            .collect();
-
-        //println!("Parsed lines: {:?}", all_parsed_lines[1]);
-        //let mut csq = extract_and_remove_csq(extract_and_remove_csq[1..2]);
-        println!("Parsed lines: {:?}", all_parsed_lines[1]);
-        // Convert Vec<Vec<&str>> to Vec<String> by joining each line's parts with tabs
-        let mut string_lines: Vec<String> = all_parsed_lines
-            .into_iter()
-            .map(|line_parts| line_parts.join("\t"))
-            .collect();
-
-        println!("Parsed lines 2: {:?}", extract_csq_regex(&mut string_lines).unwrap().split('|'));
-
-
-
-        //println!("Header lines count: {}", data.0.len());
-        //println!("Example header {}", data.0);  // First element (header)
-        //println!("Example data (first few): {:?}", data.1.iter().take(3).collect::<Vec<_>>());
-
-        /*
-        for (i, line) in data.1.iter().take(5).enumerate() {
-            println!("  {}: {}", i + 1, line);
-        }
-        */
-        //println!("Total data lines: {}", data.1.len());
-    */
 }
 
 fn print_startup_info(
@@ -306,9 +298,18 @@ fn print_startup_info(
     thread_count: usize,
     use_parallel: bool,
     transcript_handling: TranscriptHandling,
+    annotation_type: AnnotationType, // Add this parameter
 ) {
     println!("🧬 VCF Reformatter Starting...");
     println!("📁 Input file: {}", cli.input_file);
+    println!(
+        "🔬 Annotation type: {}",
+        match annotation_type {
+            AnnotationType::Vep => "VEP (CSQ field)",
+            AnnotationType::SnpEff => "SnpEff (ANN field)",
+            AnnotationType::Auto => "Auto-detect",
+        }
+    );
     println!(
         "🔧 Transcript handling: {}",
         match transcript_handling {
@@ -473,7 +474,7 @@ fn print_performance_analysis(
     read_time: std::time::Duration,
     process_time: std::time::Duration,
     write_time: std::time::Duration,
-    total_time: std::time::Duration,
+    _total_time: std::time::Duration,
     variants_per_sec: f64,
     thread_count: usize,
     use_parallel: bool,
@@ -522,18 +523,19 @@ pub fn write_header_file(filename: &str, header: &str, content_length: usize) ->
 }
 
 fn get_base_filename(file_path: &str) -> String {
-    let path = std::path::Path::new(file_path);
+    let path = Path::new(file_path);
     let filename = path
         .file_name()
         .unwrap_or_default()
         .to_str()
         .unwrap_or("output");
 
-    // Remove common VCF extensions
+    // Fixed issued with the naming format when not coming from the same path
+    // the unwrap_or was making the issue, better unwrap_or!
     let base = filename
         .strip_suffix(".vcf.gz")
-        .unwrap_or(filename)
-        .strip_suffix(".vcf")
+        .or_else(|| filename.strip_suffix(".vcf"))
+        .or_else(|| filename.strip_suffix(".gz"))
         .unwrap_or(filename);
 
     base.to_string()
@@ -554,4 +556,35 @@ fn format_file_size(size: u64) -> String {
     }
 
     format!("{:.2} {}", size, UNITS[unit_index])
+}
+
+fn detect_and_print_annotation_type(header: &str, requested_type: AnnotationType) {
+    let has_vep = header.contains("##INFO=<ID=CSQ");
+    let has_snpeff = header.contains("##INFO=<ID=ANN");
+
+    match (has_vep, has_snpeff, requested_type) {
+        // Auto detection
+        (true, false, AnnotationType::Auto) => println!("🔍 Detected: VEP annotations found"),
+        (false, true, AnnotationType::Auto) => println!("🔍 Detected: SnpEff annotations found"),
+        (true, true, AnnotationType::Auto) => {
+            println!("🔍 Detected: Both VEP and SnpEff found (will use VEP)")
+        }
+        (false, false, AnnotationType::Auto) => {
+            println!("🔍 Detected: No annotation headers found")
+        }
+
+        // Explicit requests
+        (true, _, AnnotationType::Vep) => {
+            println!("🔍 Confirmed: VEP annotations found as requested")
+        }
+        (false, _, AnnotationType::Vep) => {
+            println!("⚠️  Warning: VEP requested but not found in header")
+        }
+        (_, true, AnnotationType::SnpEff) => {
+            println!("🔍 Confirmed: SnpEff annotations found as requested")
+        }
+        (_, false, AnnotationType::SnpEff) => {
+            println!("⚠️  Warning: SnpEff requested but not found (will use defaults)")
+        }
+    }
 }
