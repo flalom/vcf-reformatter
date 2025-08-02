@@ -15,6 +15,9 @@ Also incredibly useful for quick checks to your data!
 [![Performance](https://img.shields.io/badge/performance-10k--30k%20variants%2Fsec-green.svg)]()
 [![Release](https://img.shields.io/github/v/release/flalom/vcf-reformatter)](https://github.com/flalom/vcf-reformatter/releases)
 
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-purple.svg?style=flat)](https://anaconda.org/bioconda/vcf-reformatter)
+[![Conda](https://anaconda.org/bioconda/vcf-reformatter/badges/version.svg)](https://anaconda.org/bioconda/vcf-reformatter)
+
 **Transform complex VCF files into clean, analyzable tables with ease**
 
 *A high-performance Rust tool for flattening VCF files with intelligent VEP and SnpEff annotation handling*
@@ -33,6 +36,16 @@ chmod +x vcf-reformatter-v0.2.0-linux-x86_64
 # Transform your VCF file  
 ./vcf-reformatter-v0.2.0-linux-x86_64 sample.vcf.gz
 ````
+OR Via Bioconda
+```bash
+conda install -c bioconda vcf-reformatter
+# or
+# mamba install vcf-reformatter -c bioconda
+```
+OR install from [crates.io](https://crates.io/crates/vcf-reformatter):
+```bash
+cargo install vcf-reformatter
+```
 OR build from source (you need Rust toolchain):
 ```` bash
 git clone https://github.com/flalom/vcf-reformatter.git
