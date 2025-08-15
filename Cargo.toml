@@ -1,13 +1,13 @@
 [package]
 name = "vcf-reformatter"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Fast VCF file parser and reformatter with VEP and SnpEff annotation support"
+description = "Fast VCF file parser and reformatter with VEP and SnpEff annotation support which can output to MAF"
 authors = ["Flavio Lombardo <fl@flaviolombardo.site>"]
 license = "MIT"
 repository = "https://github.com/flalom/vcf-reformatter"
 homepage = "https://github.com/flalom/vcf-reformatter/blob/main/README.md"
-keywords = ["vcf", "bioinformatics", "vep", "snpeff", "variant"]
+keywords = ["vcf", "bioinformatics", "vep", "snpeff", "maf"]
 categories = ["science", "command-line-utilities"]
 readme = "README.md"
 include = [
@@ -21,7 +21,7 @@ include = [
 [dependencies]
 flate2 = "1.1.2"
 regex = "1.11.1"
-rayon = "1.7"
+rayon = "1.10.0"
 num_cpus = "1.17.0"
 clap = { version = "4.0", features = ["derive"] }
 tempfile = "3.20.0"

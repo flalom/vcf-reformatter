@@ -5,3 +5,7 @@ vcf_to_maf.Rproj
 vcf-reformatter
 .DS_Store
 ._*
+*.tsv
+*.maf
+*.sh
+*.txt

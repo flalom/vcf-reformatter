@@ -13,6 +13,7 @@
 //! - Parallel processing support for large files
 //! - Flexible output formatting
 //! ```
+use crate::essentials_fields::MafRecord;
 use crate::extract_ann_and_ann_names::extract_ann_regex;
 use crate::extract_csq_and_csq_names::extract_csq_regex;
 use crate::extract_sample_info::ParsedFormatSample;
@@ -61,7 +62,7 @@ struct AnnotationParseResult {
 /// Many variants affect multiple transcripts of the same gene. This enum
 /// controls how those multiple annotations are processed.
 ///
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptHandling {
     MostSevere,
     FirstOnly,
@@ -986,4 +987,174 @@ pub fn _reformat_vcf_data(
     data_lines: &[String],
 ) -> std::result::Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
     reformat_vcf_data_with_header("", column_names, data_lines, TranscriptHandling::FirstOnly)
+}
+
+pub fn write_maf_file(
+    filename: &str,
+    records: &[MafRecord],
+    compress: bool,
+) -> std::io::Result<()> {
+    if compress {
+        let file = std::fs::File::create(filename)?;
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        write_maf_content(&mut encoder, records)?;
+        encoder.finish()?;
+    } else {
+        let mut file = std::fs::File::create(filename)?;
+        write_maf_content(&mut file, records)?;
+    }
+    Ok(())
+}
+
+// Helper function to write MAF content
+fn write_maf_content<W: Write>(writer: &mut W, records: &[MafRecord]) -> std::io::Result<()> {
+    // Write MAF header
+    let headers = MafRecord::get_maf_headers();
+    writeln!(writer, "{}", headers.join("\t"))?;
+
+    // Write MAF records
+    for record in records {
+        writeln!(writer, "{}", record.to_tsv_line())?;
+    }
+
+    Ok(())
+}
+
+/// Process VCF data in chunks to avoid memory exhaustion on large files
+pub fn reformat_vcf_data_with_header_parallel_chunked(
+    header: &str,
+    column_names: &str,
+    data_lines: &[String],
+    transcript_handling: TranscriptHandling,
+    output_writer: &mut dyn Write,
+) -> std::result::Result<Vec<String>, Box<dyn std::error::Error>> {
+    let csq_field_names = extract_csq_format_from_header(header);
+    let ann_field_names = extract_ann_format_from_header(header);
+    let column_names_vec: Vec<&str> = column_names.trim_start_matches('#').split('\t').collect();
+
+    // Calculate chunk size
+    let chunk_size = if data_lines.len() > 1_000_000 {
+        50_000
+    } else if data_lines.len() > 100_000 {
+        100_000
+    } else {
+        data_lines.len()
+    };
+
+    let mut headers_generated = false;
+    let mut output_headers: Vec<String> = Vec::new();
+    let mut total_processed = 0usize;
+
+    println!(
+        "🔄 Processing {} lines in chunks of {}",
+        data_lines.len(),
+        chunk_size
+    );
+
+    // Process each chunk and stream output immediately
+    for (chunk_idx, chunk) in data_lines.chunks(chunk_size).enumerate() {
+        // Process chunk in parallel
+        let chunk_results: Vec<Vec<ReformattedVcfRecord>> = chunk
+            .par_iter()
+            .enumerate()
+            .map(|(line_num, line)| {
+                ReformattedVcfRecord::from_vcf_line(
+                    line,
+                    &column_names_vec,
+                    &csq_field_names,
+                    &ann_field_names,
+                    transcript_handling,
+                )
+                .unwrap_or_else(|e| {
+                    let global_line_num = chunk_idx * chunk_size + line_num + 1;
+                    eprintln!(
+                        "Warning: Failed to parse line {}: {} ({})",
+                        global_line_num, e, line
+                    );
+                    Vec::new()
+                })
+            })
+            .collect();
+
+        // Flatten this chunk's results
+        let chunk_records: Vec<ReformattedVcfRecord> =
+            chunk_results.into_iter().flatten().collect();
+
+        // Generate headers from first non-empty chunk only
+        if !headers_generated && !chunk_records.is_empty() {
+            output_headers = generate_headers_from_records(&chunk_records, &column_names_vec);
+
+            // Write headers to output
+            writeln!(output_writer, "{}", output_headers.join("\t"))?;
+            headers_generated = true;
+
+            println!("📋 Generated {} column headers", output_headers.len());
+        }
+
+        // Stream each record immediately (NO ACCUMULATION!)
+        for record in chunk_records {
+            let values = extract_values_from_record(&record, &output_headers);
+            writeln!(output_writer, "{}", values.join("\t"))?;
+        }
+
+        total_processed += chunk.len();
+
+        // Progress logging every 100k lines
+        if total_processed % 100_000 == 0 {
+            println!("   📊 Streamed {} lines so far...", total_processed);
+        }
+    }
+
+    println!(
+        "✅ Streaming complete! Processed {} total lines",
+        total_processed
+    );
+    Ok(output_headers)
+}
+
+/// Extract values from a record in the same order as headers
+fn extract_values_from_record(record: &ReformattedVcfRecord, headers: &[String]) -> Vec<String> {
+    headers
+        .iter()
+        .map(|header| {
+            match header.as_str() {
+                "CHROM" => record.chromosome.clone(),
+                "POS" => record.position.to_string(),
+                "ID" => record.id.as_deref().unwrap_or(".").to_string(),
+                "REF" => record.reference.clone(),
+                "ALT" => record.alternate.clone(),
+                "QUAL" => record.quality.map_or(".".to_string(), |q| q.to_string()),
+                "FILTER" => record.filter.clone(),
+                _ => {
+                    // Handle INFO fields, CSQ fields, ANN fields, and sample data
+                    if let Some(value) = record.info_fields.get(header) {
+                        value.clone()
+                    } else if let Some(sample_data) = &record.format_sample_data {
+                        // Get sample value for this header
+                        extract_sample_value_for_header(sample_data, header)
+                    } else {
+                        ".".to_string()
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Helper function to extract sample values by header name
+fn extract_sample_value_for_header(sample_data: &ParsedFormatSample, header: &str) -> String {
+    // Header format: "SAMPLE_NAME_FORMAT_KEY"
+    for sample in &sample_data.samples {
+        for format_key in &sample_data.format_keys {
+            let expected_header = format!("{}_{}", sample.sample_name, format_key);
+            if expected_header == header {
+                return sample
+                    .format_fields
+                    .get(format_key)
+                    .cloned()
+                    .unwrap_or_else(|| ".".to_string());
+            }
+        }
+    }
+    ".".to_string()
 }

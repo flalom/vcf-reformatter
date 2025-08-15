@@ -30,11 +30,14 @@ Also incredibly useful for quick checks to your data!
 
 ```` bash
 # Download binary from releases (easiest! You download and use it)
-wget https://github.com/flalom/vcf-reformatter/releases/latest/download/vcf-reformatter-v0.2.0-linux-x86_64
-chmod +x vcf-reformatter-v0.2.0-linux-x86_64
+wget https://github.com/flalom/vcf-reformatter/releases/latest/download/vcf-reformatter-v0.3.0-linux-x86_64
+chmod +x vcf-reformatter-v0.3.0-linux-x86_64
 
 # Transform your VCF file  
-./vcf-reformatter-v0.2.0-linux-x86_64 sample.vcf.gz
+./vcf-reformatter-v0.3.0-linux-x86_64 sample.vcf.gz
+
+# Generate MAF output ⚠️ (in beta!)
+./vcf-reformatter-v0.3.0-linux-x86_64 sample.vcf.gz --output-format maf
 ````
 OR Via Bioconda
 ```bash
@@ -53,6 +56,17 @@ cd vcf-reformatter
 cargo build --release
 ./target/release/vcf-reformatter sample.vcf.gz
 ````
+## ⚠️ Experimental MAF support
+**MAF output is currently in beta testing (v0.3.0). Known limitations:**
+
+- VAF calculation needs refinement for some genotype patterns
+- Multi-sample handling requires validation
+- Use with caution in production workflows
+
+**Memory considerations for MAF:**
+- Files >100K variants: Monitor memory usage
+- Files >1M variants: Ensure adequate RAM (16GB+)
+
 
 ## 🎯 Why VCF Reformatter?
 
@@ -93,11 +107,11 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 
 1. **Go to [Releases](https://github.com/flalom/vcf-reformatter/releases/latest)**
 2. **Download the binary for your platform:**
-    - `vcf-reformatter-v0.2.0-linux-x86_64` → **Linux** (most users)
-    - `vcf-reformatter-v0.2.0-linux-x86_64-static` → **HPC clusters** (works everywhere)
-    - `vcf-reformatter-v0.2.0-windows-x86_64.exe` → **Windows**
-    - `vcf-reformatter-v0.2.0-macos-x86_64` → **Intel Mac**
-    - `vcf-reformatter-v0.2.0-macos-arm64` → **Apple Silicon Mac** (M1/M2/M3/M4)
+    - `vcf-reformatter-v0.3.0-linux-x86_64` → **Linux** (most users)
+    - `vcf-reformatter-v0.3.0-linux-x86_64-static` → **HPC clusters** (works everywhere)
+    - `vcf-reformatter-v0.3.0-windows-x86_64.exe` → **Windows**
+    - `vcf-reformatter-v0.3.0-macos-x86_64` → **Intel Mac**
+    - `vcf-reformatter-v0.3.0-macos-arm64` → **Apple Silicon Mac** (M1/M2/M3/M4)
 
 3. **Make executable and run:**
 ````bash
@@ -180,6 +194,12 @@ Arguments:
   <INPUT_FILE>  Input VCF file (supports .vcf.gz)
 
 Options:
+  --output-format <FORMAT>     Output format [default: tsv] 
+                               [values: tsv, maf]
+  --center <CENTER>            Sequencing center for MAF output  
+  --ncbi-build <BUILD>         Genome build 
+                               [default: GRCh38]
+  --sample-barcode <BARCODE>   Sample identifier for MAF output
   -t, --transcript-handling <MODE>  How to handle multiple transcripts
                                    [default: first]
                                    [values: most-severe, first, split]
@@ -203,6 +223,9 @@ VCF files with VEP annotations often contain multiple transcript annotations per
 **Best for:** Clinical analysis, variant prioritization
 ```shell script
 vcf-reformatter input.vcf.gz -t most-severe
+
+# for maf output
+vcf-reformatter input.vcf.gz -t most-severe --output-format maf
 ```
 Selects the transcript with the most severe consequence (stop_gained > missense_variant > synonymous, etc.)
 
@@ -333,15 +356,24 @@ singularity run \
 | **Quick Data Exploration** | `vcf-reformatter sample.vcf.gz` | Simple, fast conversion for immediate analysis |
 | **HPC Batch Processing** | `vcf-reformatter huge.vcf.gz -t most-severe -j 32 -c` | Optimized for high-performance computing |
 
-## 🚀 What's New in v0.2.0
-+ - ✅ **SnpEff Support** - Full ANN field parsing with intelligent detection
-+ - ✅ **Smart Auto-Detection** - Automatically identifies VEP vs SnpEff annotations
-+ - ✅ **Enhanced Error Handling** - Better processing of malformed or headerless files
+## 🚀 What's New in v0.3.0
+- ✅ **MAF Output Support (in Beta⚠️)** - Direct conversion to Mutation Annotation Format
+- ✅ **Auto-metadata Detection (in Beta⚠️)** - Extracts center/sample info from VCF headers for MAF
+- ✅ **Memory-Efficient Processing (streaming)** - Chunked streaming for large files (>>100K variants)
+- ✅ **Enhanced Error Handling** - Better processing of malformed files
+- ✅ **Comprehensive Testing** - 70+ test cases ensure reliability
+
+## Previous Releases
+### 🚀 What's New in v0.2.0
+- ✅ **SnpEff Support** - Full ANN field parsing with intelligent detection
+- ✅ **Smart Auto-Detection** - Automatically identifies VEP vs SnpEff annotations
+- ✅ **Enhanced Error Handling** - Better processing of malformed or headerless files
 
 ## TODOs
 - ~~Add SnpEff support✅~~
-- Output MAF format option
+- ~~Output MAF format option✅~~
 - Add `stdin` to combine with other tools, such as `bcftools`
+- Support for multi-sample VCF files in MAF output
 
 ## 🤝 Contributing
 
@@ -376,6 +408,37 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Bioinformatics Community** - For feedback and feature requests
 
 ---
+
+## Frequently Asked Questions
+
+### Q: Which transcript handling mode should I use?
+- **Clinical analysis**: `--transcript-handling most-severe`
+- **Quick exploration**: `--transcript-handling first`
+- **Comprehensive analysis**: `--transcript-handling split`
+
+### Q: How does this compare to other VCF tools?
+VCF Reformatter is specifically designed for:
+- Converting complex VEP/SnpEff annotations to tabular format
+- Handling multiple transcripts intelligently
+- High-performance parallel processing
+- Easy integration with R/Python workflows
+
+### Q: Can I use this in production pipelines?
+Yes! VCF Reformatter is designed for production use with:
+- Comprehensive error handling
+- Docker/Singularity support
+- Automated testing
+- Stable CLI interface
+
+### Q: What's the difference between TSV and MAF output?
+- **TSV**: Direct flattening of VCF fields (default)
+- **MAF (beta)**: Standardized cancer genomics format for downstream tools
+
+### Q: What if I get out-of-memory errors?
+- Use TSV format instead of MAF: `vcf-reformatter file.vcf.gz -j 0 -c`
+- Enable verbose mode to monitor: `vcf-reformatter file.vcf.gz -v`
+
+___
 
 ## 📞 Support
 
