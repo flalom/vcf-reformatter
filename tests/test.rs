@@ -9,7 +9,6 @@ use vcf_reformatter::{
     extract_sample_info::{parse_format_and_samples, ParsedFormatSample, _SampleData},
     get_info_from_header::{_extract_all_info_descriptions, extract_csq_format_from_header},
     read_vcf_gz::read_vcf_gz,
-    reformat_vcf,
     reformat_vcf::{
         get_ann_impact_severity, parse_info_field, reformat_vcf_data_with_header,
         reformat_vcf_data_with_header_parallel, sanitize_field_name, write_reformatted_vcf,
@@ -1930,7 +1929,6 @@ fn test_maf_vep_vs_snpeff_annotations() {
 }
 
 #[test]
-#[test]
 fn test_maf_vaf_calculation() {
     // Create a simple inline VAF calculation function for testing
     fn calculate_vaf(tumor_depth: Option<u32>, total_depth: Option<u32>) -> Option<f32> {
@@ -2341,7 +2339,7 @@ chr1	69511	.	C	T	200	PASS	DP=60;AF=0.8;CSQ=T|synonymous_variant|LOW|OR4F5|ENSG00
 
     let dir = tempdir().unwrap();
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--",
             temp_vcf_gz.path().to_str().unwrap(),
@@ -2375,7 +2373,6 @@ chr1	69511	.	C	T	200	PASS	DP=60;AF=0.8;CSQ=T|synonymous_variant|LOW|OR4F5|ENSG00
 // Tests for chunking processing
 // ------------------------------------------------------------------------------
 // Add these imports at the top of your test.rs if they're not already there
-use std::io::Cursor;
 // Test 1: Verify chunked streaming function works correctly
 #[test]
 fn test_chunked_streaming_basic() {
