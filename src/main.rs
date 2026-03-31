@@ -40,6 +40,10 @@ mod extract_sample_info;
 mod get_info_from_header;
 mod read_vcf_gz;
 mod reformat_vcf;
+mod summary;
+
+#[cfg(feature = "parquet_out")]
+mod parquet_writer;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -150,6 +154,14 @@ struct Cli {
     /// Sample barcode for MAF output (auto-detected from header if not provided)
     #[arg(long)]
     sample_barcode: Option<String>,
+
+    /// Write a summary statistics file alongside output
+    #[arg(long)]
+    summary: bool,
+
+    /// Output in Apache Parquet format instead of text
+    #[arg(long)]
+    parquet: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -303,6 +315,18 @@ fn validate_maf_arguments(cli: &Cli, metadata: &MafMetadata) -> Result<MafConfig
 
 fn main() {
     let cli = Cli::parse();
+
+    // Validate --parquet + --compress conflict
+    if cli.parquet && cli.compress {
+        eprintln!("Error: Parquet has built-in compression; --compress is not needed with --parquet");
+        std::process::exit(1);
+    }
+
+    #[cfg(not(feature = "parquet_out"))]
+    if cli.parquet {
+        eprintln!("Error: Parquet support not compiled. Rebuild with: cargo build --release --features parquet_out");
+        std::process::exit(1);
+    }
 
     // Validate input file
     if !Path::new(&cli.input_file).exists() {
@@ -511,7 +535,7 @@ fn main() {
             };
 
             match result {
-                Ok((_headers, records)) => {
+                Ok((headers, records)) => {
                     let process_time = process_start.elapsed();
                     let variants_per_sec = data.2.len() as f64 / process_time.as_secs_f64();
                     println!("✅ Data processing completed in {process_time:.2?}");
@@ -535,6 +559,37 @@ fn main() {
                         );
                     }
                     println!();
+
+                    // Write parquet output if requested
+                    #[cfg(feature = "parquet_out")]
+                    if cli.parquet && !records.is_empty() {
+                        let parquet_file = reformatted_file
+                            .replace(".tsv.gz", ".parquet")
+                            .replace(".tsv", ".parquet");
+                        match parquet_writer::write_tsv_as_parquet(&parquet_file, &headers, &records) {
+                            Ok(()) => println!("✅ Parquet file written: {}", parquet_file),
+                            Err(e) => {
+                                eprintln!("❌ Error writing parquet file: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+
+                    // Write summary if requested
+                    if !records.is_empty() {
+                        let mut output_chrom_counts = indexmap::IndexMap::new();
+                        for r in &records {
+                            *output_chrom_counts.entry(r.chromosome.clone()).or_insert(0usize) += 1;
+                        }
+                        write_summary_if_requested(
+                            &cli,
+                            &data.2,
+                            records.len(),
+                            output_chrom_counts,
+                            process_time.as_secs_f64(),
+                            variants_per_sec,
+                        );
+                    }
 
                     // File writing is already handled above for streaming case
                     let write_time = std::time::Duration::from_millis(10); // Nominal time for streamed files
@@ -635,17 +690,54 @@ fn main() {
             // Generate MAF output filename
             let maf_output_file = generate_maf_output_filename(&cli);
 
-            // Write MAF file
-            println!(
-                "💾 Writing MAF file{}...",
-                if cli.compress { " (compressed)" } else { "" }
-            );
+            // Write MAF file (parquet or text)
             let write_start = Instant::now();
-            if let Err(e) = write_maf_file(&maf_output_file, &maf_records, cli.compress) {
-                eprintln!("❌ Error writing MAF file: {e}");
-                std::process::exit(1);
+            #[cfg(feature = "parquet_out")]
+            if cli.parquet {
+                let parquet_file = maf_output_file
+                    .replace(".maf.gz", ".maf.parquet")
+                    .replace(".maf", ".maf.parquet");
+                match parquet_writer::write_maf_as_parquet(&parquet_file, &maf_records) {
+                    Ok(()) => println!("✅ MAF Parquet file written: {}", parquet_file),
+                    Err(e) => {
+                        eprintln!("❌ Error writing MAF parquet file: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            #[cfg(feature = "parquet_out")]
+            let skip_text = cli.parquet;
+            #[cfg(not(feature = "parquet_out"))]
+            let skip_text = false;
+
+            if !skip_text {
+                println!(
+                    "💾 Writing MAF file{}...",
+                    if cli.compress { " (compressed)" } else { "" }
+                );
+                if let Err(e) = write_maf_file(&maf_output_file, &maf_records, cli.compress) {
+                    eprintln!("❌ Error writing MAF file: {e}");
+                    std::process::exit(1);
+                }
             }
             let write_time = write_start.elapsed();
+
+            // Write summary if requested
+            {
+                let mut output_chrom_counts = indexmap::IndexMap::new();
+                for r in &maf_records {
+                    *output_chrom_counts.entry(r.chromosome.clone()).or_insert(0usize) += 1;
+                }
+                write_summary_if_requested(
+                    &cli,
+                    &data.2,
+                    maf_records.len(),
+                    output_chrom_counts,
+                    process_time.as_secs_f64(),
+                    variants_per_sec,
+                );
+            }
             let total_time = total_start.elapsed();
             println!(
                 "✅ MAF file written in {:.2?}{}",
@@ -819,6 +911,61 @@ fn generate_output_filenames(cli: &Cli) -> (String, String) {
     let reformatted_file = format!("{}/{}_reformatted.{}", output_dir, prefix, extension);
 
     (header_file, reformatted_file)
+}
+
+fn generate_summary_filename(cli: &Cli) -> String {
+    let input_path = Path::new(&cli.input_file);
+    let base_name = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let base_name = base_name.strip_suffix(".vcf").unwrap_or(base_name);
+    let output_dir = cli.output_dir.as_deref().unwrap_or(".");
+    let prefix = cli.prefix.as_deref().unwrap_or(base_name);
+    format!("{}/{}_summary.txt", output_dir, prefix)
+}
+
+fn write_summary_if_requested(
+    cli: &Cli,
+    data_lines: &[String],
+    output_record_count: usize,
+    output_chrom_counts: indexmap::IndexMap<String, usize>,
+    process_time_secs: f64,
+    variants_per_sec: f64,
+) {
+    if !cli.summary {
+        return;
+    }
+    let input_chrom_counts = summary::count_input_chromosomes(data_lines);
+    let output_chrom_counts = summary::sort_chromosomes(output_chrom_counts);
+
+    let output_format = match cli.output_format {
+        OutputFormatCli::Tsv => "TSV",
+        OutputFormatCli::Maf => "MAF",
+    };
+    let transcript_mode = match cli.transcript_handling {
+        TranscriptHandlingCli::FirstOnly => "first",
+        TranscriptHandlingCli::MostSevere => "most-severe",
+        TranscriptHandlingCli::SplitRows => "split",
+    };
+
+    let summary_stats = summary::SummaryStats {
+        input_file: cli.input_file.clone(),
+        output_format: output_format.to_string(),
+        transcript_handling: transcript_mode.to_string(),
+        input_variant_count: data_lines.len(),
+        output_record_count,
+        input_chrom_counts,
+        output_chrom_counts,
+        processing_time_secs: process_time_secs,
+        variants_per_sec,
+    };
+    let summary_file = generate_summary_filename(cli);
+    if let Err(e) = summary_stats.write_to_file(&summary_file) {
+        eprintln!("Warning: Could not write summary file: {}", e);
+    } else {
+        println!("Summary written to: {}", summary_file);
+    }
 }
 
 fn write_header_file(filename: &str, header: &str, variant_count: usize) -> std::io::Result<()> {
