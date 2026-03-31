@@ -18,6 +18,10 @@ include = [
     "LICENSE",
 ]
 
+[features]
+default = []
+parquet_out = ["dep:arrow", "dep:parquet"]
+
 [dependencies]
 flate2 = "1.1.2"
 regex = "1.11.1"
@@ -25,3 +29,7 @@ rayon = "1.10.0"
 num_cpus = "1.17.0"
 clap = { version = "4.0", features = ["derive"] }
 tempfile = "3.20.0"
+indexmap = "2.7"
+chrono = "0.4"
+arrow = { version = "53", optional = true, features = ["prettyprint"] }
+parquet = { version = "53", optional = true }
