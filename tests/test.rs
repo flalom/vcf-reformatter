@@ -2996,3 +2996,291 @@ fn test_chunked_error_handling() {
     // Should have header + 3 good records (2 bad records filtered out)
     assert_eq!(lines.len(), 4); // header + 3 valid data lines
 }
+
+// ============================================================================
+// Row Count Conservation Tests
+// ============================================================================
+
+#[test]
+fn test_row_count_tsv_first_transcript() {
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
+
+    let header = "##fileformat=VCFv4.2\n##INFO=<ID=ANN,Number=.,Type=String,Description=\"Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'\">";
+    let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+    let data_lines = vec![
+        "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;ANN=G|missense_variant|MODERATE|BRCA1|ENSG1|transcript|ENST1|protein_coding|5/24|c.1T>C|p.M1T|1/100|1/100|1/33||".to_string(),
+        "chr1\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG2|transcript|ENST2|protein_coding|7/11|c.2C>T|p.Q2*|2/200|2/200|2/66||".to_string(),
+        "chr2\t300\t.\tG\tA\t50\tPASS\tDP=20;ANN=A|synonymous_variant|LOW|EGFR|ENSG3|transcript|ENST3|protein_coding|3/8|c.3G>A|p.L3L|3/300|3/300|3/99||".to_string(),
+    ];
+
+    let (_, records) = reformat_vcf_data_with_header(
+        header, columns, &data_lines, TranscriptHandling::FirstOnly,
+    ).unwrap();
+
+    assert_eq!(
+        records.len(), data_lines.len(),
+        "Row count mismatch: {} input lines but {} output records",
+        data_lines.len(), records.len()
+    );
+}
+
+#[test]
+fn test_row_count_maf_first_transcript() {
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
+    use vcf_reformatter::essentials_fields::MafRecord;
+
+    let header = "##fileformat=VCFv4.2\n##INFO=<ID=ANN,Number=.,Type=String,Description=\"Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'\">";
+    let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+    let data_lines = vec![
+        "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;ANN=G|missense_variant|MODERATE|BRCA1|ENSG1|transcript|ENST1|protein_coding|5/24|c.1T>C|p.M1T|1/100|1/100|1/33||".to_string(),
+        "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG2|transcript|ENST2|protein_coding|7/11|c.2C>T|p.Q2*|2/200|2/200|2/66||".to_string(),
+    ];
+
+    let (_, records) = reformat_vcf_data_with_header(
+        header, columns, &data_lines, TranscriptHandling::FirstOnly,
+    ).unwrap();
+
+    let mut maf_count = 0;
+    for record in &records {
+        let _maf = MafRecord::from_reformatted_record(record, "TEST", "GRCh38", "SAMPLE").unwrap();
+        maf_count += 1;
+    }
+
+    assert_eq!(
+        maf_count, data_lines.len(),
+        "MAF row count mismatch: {} input lines but {} MAF records",
+        data_lines.len(), maf_count
+    );
+}
+
+#[test]
+fn test_row_count_split_transcripts() {
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
+
+    let header = "##fileformat=VCFv4.2\n##INFO=<ID=ANN,Number=.,Type=String,Description=\"Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'\">";
+    let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+
+    // Line 1: 2 transcripts (comma-separated in ANN)
+    // Line 2: 1 transcript
+    let data_lines = vec![
+        "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;ANN=G|missense_variant|MODERATE|BRCA1|ENSG1|transcript|ENST1|protein_coding|5/24|c.1T>C|p.M1T|1/100|1/100|1/33||,G|synonymous_variant|LOW|BRCA1|ENSG1|transcript|ENST2|protein_coding|3/24|c.1T>C|p.M1M|1/100|1/100|1/33||".to_string(),
+        "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG2|transcript|ENST3|protein_coding|7/11|c.2C>T|p.Q2*|2/200|2/200|2/66||".to_string(),
+    ];
+
+    let (_, records) = reformat_vcf_data_with_header(
+        header, columns, &data_lines, TranscriptHandling::SplitRows,
+    ).unwrap();
+
+    // 2 input lines, but line 1 has 2 transcripts -> 3 output records
+    let expected_output_rows = 3;
+    assert_eq!(
+        records.len(), expected_output_rows,
+        "Split transcript count mismatch: expected {} output records, got {}",
+        expected_output_rows, records.len()
+    );
+
+    assert!(records.len() > data_lines.len(), "Split mode should produce more records than input lines");
+}
+
+// ============================================================================
+// Summary Correctness Tests
+// ============================================================================
+
+#[test]
+fn test_summary_input_counts_sum() {
+    use vcf_reformatter::summary::count_input_chromosomes;
+
+    let lines = vec![
+        "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
+        "chr1\t200\t.\tC\tT\t40\tPASS\tDP=30".to_string(),
+        "chr2\t300\t.\tG\tA\t50\tPASS\tDP=20".to_string(),
+        "chrX\t400\t.\tT\tC\t70\tPASS\tDP=40".to_string(),
+        "chrX\t500\t.\tA\tT\t80\tPASS\tDP=60".to_string(),
+    ];
+
+    let counts = count_input_chromosomes(&lines);
+    let total: usize = counts.values().sum();
+    assert_eq!(total, lines.len(), "Sum of per-chromosome counts must equal total input variants");
+}
+
+#[test]
+fn test_summary_chromosome_order() {
+    use vcf_reformatter::summary::count_input_chromosomes;
+
+    let lines = vec![
+        "chrY\t100\t.\tA\tG\t60\tPASS\t.".to_string(),
+        "chr10\t200\t.\tC\tT\t40\tPASS\t.".to_string(),
+        "chr2\t300\t.\tG\tA\t50\tPASS\t.".to_string(),
+        "chrX\t400\t.\tT\tC\t70\tPASS\t.".to_string(),
+        "chr1\t500\t.\tA\tT\t80\tPASS\t.".to_string(),
+        "chrM\t600\t.\tG\tC\t90\tPASS\t.".to_string(),
+    ];
+
+    let counts = count_input_chromosomes(&lines);
+    let keys: Vec<&String> = counts.keys().collect();
+    assert_eq!(keys, vec!["chr1", "chr2", "chr10", "chrX", "chrY", "chrM"]);
+}
+
+#[test]
+fn test_summary_expansion_ratio_first_mode() {
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
+
+    let header = "##fileformat=VCFv4.2";
+    let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+    let data_lines = vec![
+        "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
+        "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30".to_string(),
+    ];
+
+    let (_, records) = reformat_vcf_data_with_header(
+        header, columns, &data_lines, TranscriptHandling::FirstOnly,
+    ).unwrap();
+
+    let ratio = records.len() as f64 / data_lines.len() as f64;
+    assert!((ratio - 1.0).abs() < 0.001, "First-only mode should have expansion ratio of 1.0, got {}", ratio);
+}
+
+#[test]
+fn test_summary_write_and_read() {
+    use vcf_reformatter::summary::SummaryStats;
+    use indexmap::IndexMap;
+
+    let mut input_counts = IndexMap::new();
+    input_counts.insert("chr1".to_string(), 50);
+    input_counts.insert("chr2".to_string(), 30);
+    input_counts.insert("chrX".to_string(), 20);
+
+    let mut output_counts = IndexMap::new();
+    output_counts.insert("chr1".to_string(), 50);
+    output_counts.insert("chr2".to_string(), 30);
+    output_counts.insert("chrX".to_string(), 20);
+
+    let stats = SummaryStats {
+        input_file: "test.vcf.gz".to_string(),
+        output_format: "TSV".to_string(),
+        transcript_handling: "FirstOnly".to_string(),
+        input_variant_count: 100,
+        output_record_count: 100,
+        input_chrom_counts: input_counts,
+        output_chrom_counts: output_counts,
+        processing_time_secs: 1.5,
+        variants_per_sec: 66.7,
+    };
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+    stats.write_to_file(path).unwrap();
+
+    let content = std::fs::read_to_string(path).unwrap();
+    assert!(content.contains("Total input variants:     100"));
+    assert!(content.contains("Total output records:     100"));
+    assert!(content.contains("chr1"));
+    assert!(content.contains("50.0%"));
+    assert!(content.contains("1.00x")); // expansion ratio
+}
+
+// ============================================================================
+// Parquet Equivalence Tests
+// ============================================================================
+
+#[cfg(feature = "parquet_out")]
+mod parquet_tests {
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    fn count_parquet_rows(path: &str) -> usize {
+        let file = std::fs::File::open(path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let mut total = 0i64;
+        for rg in reader.metadata().row_groups() {
+            total += rg.num_rows();
+        }
+        total as usize
+    }
+
+    #[test]
+    fn test_parquet_row_count_matches_tsv() {
+        let header = "##fileformat=VCFv4.2\n##INFO=<ID=ANN,Number=.,Type=String,Description=\"Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'\">";
+        let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+        let data_lines = vec![
+            "chr1\t100\trs1\tA\tG\t60\tPASS\tDP=50;ANN=G|missense_variant|MODERATE|BRCA1|ENSG1|transcript|ENST1|protein_coding|5/24|c.1T>C|p.M1T|1/100|1/100|1/33||".to_string(),
+            "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG2|transcript|ENST2|protein_coding|7/11|c.2C>T|p.Q2*|2/200|2/200|2/66||".to_string(),
+        ];
+
+        let (headers, records) = reformat_vcf_data_with_header(
+            header, columns, &data_lines, TranscriptHandling::FirstOnly,
+        ).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        vcf_reformatter::parquet_writer::write_tsv_as_parquet(path, &headers, &records).unwrap();
+
+        let total_rows = count_parquet_rows(path);
+        assert_eq!(
+            total_rows, records.len(),
+            "Parquet row count ({}) must match TSV record count ({})",
+            total_rows, records.len()
+        );
+    }
+
+    #[test]
+    fn test_parquet_columns_match_tsv_headers() {
+        let header = "##fileformat=VCFv4.2";
+        let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+        let data_lines = vec![
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
+        ];
+
+        let (headers, records) = reformat_vcf_data_with_header(
+            header, columns, &data_lines, TranscriptHandling::FirstOnly,
+        ).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        vcf_reformatter::parquet_writer::write_tsv_as_parquet(path, &headers, &records).unwrap();
+
+        let file = std::fs::File::open(path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let schema = reader.metadata().file_metadata().schema_descr().clone();
+        let parquet_columns: Vec<String> = schema.columns().iter().map(|c| c.name().to_string()).collect();
+
+        assert_eq!(
+            parquet_columns, headers,
+            "Parquet column names must match TSV headers exactly"
+        );
+    }
+
+    #[test]
+    fn test_parquet_maf_row_count() {
+        use vcf_reformatter::essentials_fields::MafRecord;
+
+        let header = "##fileformat=VCFv4.2\n##INFO=<ID=ANN,Number=.,Type=String,Description=\"Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'\">";
+        let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+        let data_lines = vec![
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;ANN=G|missense_variant|MODERATE|BRCA1|ENSG1|transcript|ENST1|protein_coding|5/24|c.1T>C|p.M1T|1/100|1/100|1/33||".to_string(),
+            "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG2|transcript|ENST2|protein_coding|7/11|c.2C>T|p.Q2*|2/200|2/200|2/66||".to_string(),
+        ];
+
+        let (_, records) = reformat_vcf_data_with_header(
+            header, columns, &data_lines, TranscriptHandling::FirstOnly,
+        ).unwrap();
+
+        let maf_records: Vec<MafRecord> = records.iter()
+            .map(|r| MafRecord::from_reformatted_record(r, "TEST", "GRCh38", "SAMPLE").unwrap())
+            .collect();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+
+        vcf_reformatter::parquet_writer::write_maf_as_parquet(path, &maf_records).unwrap();
+
+        let total_rows = count_parquet_rows(path);
+        assert_eq!(
+            total_rows, maf_records.len(),
+            "Parquet MAF row count ({}) must match MAF record count ({})",
+            total_rows, maf_records.len()
+        );
+    }
+}
