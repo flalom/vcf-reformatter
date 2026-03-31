@@ -96,6 +96,8 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 | 🚀 **Parallel Processing**              | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
 | 📁 **Native Compression**               | Direct `.vcf.gz` reading & gzip output           | Seamless workflow with compressed/uncompressed files |
 | 🎯 **Production Ready**                 | Comprehensive error handling & logging           | Reliable for automated pipelines                     |
+| 📋 **Summary Reports**                  | Per-chromosome variant distribution and processing stats | QC and reproducibility for pipeline logs             |
+| 📦 **Parquet Output**                   | Apache Parquet format with Snappy compression (optional feature) | 2-3x smaller files, native support in polars/DuckDB/R |
 | 🐳 **Container Support**                | Docker & Singularity ready                       | Deploy anywhere, from laptops to HPC clusters        |
 
 ---
@@ -172,6 +174,20 @@ vcf-reformatter vep_annotated.vcf.gz -a vep -t most-severe
 # Force SnpEff processing  
 vcf-reformatter snpeff_annotated.vcf.gz -a snpeff -t most-severe
 ```
+### Summary and Parquet Output
+```shell script
+# Generate a processing summary report
+vcf-reformatter input.vcf.gz --summary
+
+# Output as Apache Parquet (requires parquet_out feature)
+vcf-reformatter input.vcf.gz --parquet
+
+# MAF as parquet with summary
+vcf-reformatter input.vcf.gz --output-format maf --parquet --summary
+
+# Build from source with parquet support
+cargo build --release --features parquet_out
+```
 ### Advanced Usage
 ```shell script
 # High-performance processing with compression
@@ -210,6 +226,8 @@ Options:
   -o, --output-dir <DIR>           Output directory [default: current]
   -p, --prefix <PREFIX>            Output file prefix [default: input filename]
   -c, --compress                   Compress output with gzip
+      --summary                    Write a summary statistics file alongside output
+      --parquet                    Output in Apache Parquet format instead of text
   -v, --verbose                    Detailed performance statistics
   -h, --help                       Show help
   -V, --version                    Show version
