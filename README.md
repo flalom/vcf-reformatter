@@ -90,7 +90,7 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 
 | Feature                                 | Description                                      | Benefit                                              |
 |-----------------------------------------|--------------------------------------------------|------------------------------------------------------|
-| 🧬 **VEP/SnpEff Annotation Parsing**    | Intelligent handling of CSQ/ANN annotations      | No more manual parsing of complex VEP/SnpEff output  |
+| 🧬 **VEP/SnpEff Annotation Parsing**    | Intelligent handling of CSQ/ANN annotations with correct field mapping for both | No more manual parsing of complex VEP/SnpEff output  |
 | 👀 **Automatic Annotation Recognition** | Automatic detection of CSQ/ANN annotations       | Saving even more time now for both VEP and SnpEff    |
 | 🔀 **Smart Transcript Handling**        | Most severe, first only, or split transcripts    | Choose the analysis approach that fits your needs    |
 | 🚀 **Parallel Processing**              | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
@@ -251,6 +251,11 @@ Creates separate rows for each transcript (most detailed output)
 - **Medium files** (1K-10K variants): ~15,000 variants/sec
 - **Large files** (10K+ variants): ~30,000 variants/sec
 
+### Internal Optimizations
+- **Zero-copy output**: TSV and MAF output use borrowed references (`Cow<str>`) instead of cloning strings, reducing heap allocations per variant
+- **Move semantics**: Single-transcript variants (the common case) avoid all string cloning during record construction
+- **Streaming processing**: Chunked streaming for large files keeps memory usage constant regardless of file size
+
 ### Optimization Tips
 ```shell script
 # Auto-detect optimal thread count
@@ -356,14 +361,18 @@ singularity run \
 | **Quick Data Exploration** | `vcf-reformatter sample.vcf.gz` | Simple, fast conversion for immediate analysis |
 | **HPC Batch Processing** | `vcf-reformatter huge.vcf.gz -t most-severe -j 32 -c` | Optimized for high-performance computing |
 
-## 🚀 What's New in v0.3.0
+## 🚀 What's New in v0.4.0
+- ✅ **Performance: Reduced memory allocations** - Replaced ~30 unnecessary `.clone()` calls with zero-cost borrows using `Cow<str>`, `as_str()`, and move semantics
+- ✅ **Comprehensive Testing** - 86 test cases ensure reliability across VEP and SnpEff pipelines
+
+## Previous Releases
+### 🚀 What's New in v0.3.0
 - ✅ **MAF Output Support (in Beta⚠️)** - Direct conversion to Mutation Annotation Format
 - ✅ **Auto-metadata Detection (in Beta⚠️)** - Extracts center/sample info from VCF headers for MAF
 - ✅ **Memory-Efficient Processing (streaming)** - Chunked streaming for large files (>>100K variants)
 - ✅ **Enhanced Error Handling** - Better processing of malformed files
 - ✅ **Comprehensive Testing** - 70+ test cases ensure reliability
 
-## Previous Releases
 ### 🚀 What's New in v0.2.0
 - ✅ **SnpEff Support** - Full ANN field parsing with intelligent detection
 - ✅ **Smart Auto-Detection** - Automatically identifies VEP vs SnpEff annotations
@@ -372,8 +381,11 @@ singularity run \
 ## TODOs
 - ~~Add SnpEff support✅~~
 - ~~Output MAF format option✅~~
+- ~~Reduce `.clone()` allocations for better performance✅~~
 - Add `stdin` to combine with other tools, such as `bcftools`
 - Support for multi-sample VCF files in MAF output
+- Streaming MAF output for large files
+- Unified annotation parsing (deduplicate CSQ/ANN code paths)
 
 ## 🤝 Contributing
 

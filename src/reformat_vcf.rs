@@ -21,6 +21,7 @@ use crate::get_info_from_header::{extract_ann_format_from_header, extract_csq_fo
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::{BufWriter, Write};
@@ -85,6 +86,7 @@ pub struct ReformattedVcfRecord {
     pub filter: String,
     pub info_fields: HashMap<String, String>,
     pub format_sample_data: Option<ParsedFormatSample>,
+    pub annotation_field_type: AnnotationFieldType,
 }
 
 impl ReformattedVcfRecord {
@@ -158,23 +160,60 @@ impl ReformattedVcfRecord {
             None
         };
 
-        let info_variants =
+        let (info_variants, annotation_field_type) =
             parse_info_field(info, csq_field_names, ann_field_names, transcript_handling)?;
 
-        let records: Vec<Self> = info_variants
-            .into_iter()
-            .map(|info_fields| Self {
-                chromosome: chromosome.clone(),
+        let len = info_variants.len();
+        let records: Vec<Self> = if len == 1 {
+            // Common case: single record, move values without cloning
+            vec![Self {
+                chromosome,
                 position,
-                id: id.clone(),
-                reference: reference.clone(),
-                alternate: alternate.clone(),
+                id,
+                reference,
+                alternate,
                 quality,
-                filter: filter.clone(),
-                info_fields,
-                format_sample_data: format_sample_data.clone(),
-            })
-            .collect();
+                filter,
+                info_fields: info_variants.into_iter().next().unwrap(),
+                format_sample_data,
+                annotation_field_type,
+            }]
+        } else {
+            // Multiple records: clone for all but the last, move for the last
+            let mut records = Vec::with_capacity(len);
+            let mut variants_iter = info_variants.into_iter().peekable();
+            while let Some(info_fields) = variants_iter.next() {
+                if variants_iter.peek().is_some() {
+                    records.push(Self {
+                        chromosome: chromosome.clone(),
+                        position,
+                        id: id.clone(),
+                        reference: reference.clone(),
+                        alternate: alternate.clone(),
+                        quality,
+                        filter: filter.clone(),
+                        info_fields,
+                        format_sample_data: format_sample_data.clone(),
+                        annotation_field_type,
+                    });
+                } else {
+                    records.push(Self {
+                        chromosome,
+                        position,
+                        id,
+                        reference,
+                        alternate,
+                        quality,
+                        filter,
+                        info_fields,
+                        format_sample_data,
+                        annotation_field_type,
+                    });
+                    break;
+                }
+            }
+            records
+        };
 
         Ok(records)
     }
@@ -202,22 +241,23 @@ pub fn parse_info_field(
     csq_field_names: &Option<Vec<String>>,
     ann_field_names: &Option<Vec<String>>,
     transcript_handling: TranscriptHandling,
-) -> std::result::Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
+) -> std::result::Result<(Vec<HashMap<String, String>>, AnnotationFieldType), Box<dyn std::error::Error>> {
     if info.is_empty() {
-        return Ok(vec![HashMap::new()]);
+        return Ok((vec![HashMap::new()], AnnotationFieldType::None));
     }
 
     let annotation_result =
         parse_annotation_fields(info, csq_field_names, ann_field_names, transcript_handling)?;
 
+    let field_type = annotation_result.field_type;
     let remaining_info_map = parse_remaining_info_fields(&annotation_result.remaining_info)?;
-    let combined_records =
-        combine_annotation_with_info(annotation_result.records, remaining_info_map.clone());
 
-    if combined_records.is_empty() {
-        Ok(vec![remaining_info_map])
+    if annotation_result.records.is_empty() {
+        Ok((vec![remaining_info_map], field_type))
     } else {
-        Ok(combined_records)
+        let combined_records =
+            combine_annotation_with_info(annotation_result.records, remaining_info_map);
+        Ok((combined_records, field_type))
     }
 }
 
@@ -242,7 +282,7 @@ fn parse_annotation_fields(
                         return Ok(AnnotationParseResult {
                             field_type: AnnotationFieldType::Csq,
                             records,
-                            remaining_info: parsed_lines[7].clone(),
+                            remaining_info: std::mem::take(&mut parsed_lines[7]),
                         });
                     }
                     Ok(_) => {}
@@ -264,7 +304,7 @@ fn parse_annotation_fields(
                         return Ok(AnnotationParseResult {
                             field_type: AnnotationFieldType::Ann,
                             records,
-                            remaining_info: parsed_lines[7].clone(),
+                            remaining_info: std::mem::take(&mut parsed_lines[7]),
                         });
                     }
                     Ok(_) => {}
@@ -907,42 +947,42 @@ fn write_tsv_content<W: Write>(
     records: &[ReformattedVcfRecord],
 ) -> std::io::Result<()> {
     writeln!(writer, "{}", headers.join("\t"))?;
+    let dot = ".";
 
     for record in records {
-        let mut row = Vec::new();
+        let mut row: Vec<Cow<str>> = Vec::with_capacity(headers.len());
 
         for header in headers {
-            let value = match header.as_str() {
-                "CHROM" => record.chromosome.clone(),
-                "POS" => record.position.to_string(),
-                "ID" => record.id.as_ref().unwrap_or(&".".to_string()).clone(),
-                "REF" => record.reference.clone(),
-                "ALT" => record.alternate.clone(),
-                "QUAL" => record
-                    .quality
-                    .map(|q| q.to_string())
-                    .unwrap_or(".".to_string()),
-                "FILTER" => record.filter.clone(),
+            let value: Cow<str> = match header.as_str() {
+                "CHROM" => Cow::Borrowed(record.chromosome.as_str()),
+                "POS" => Cow::Owned(record.position.to_string()),
+                "ID" => Cow::Borrowed(record.id.as_deref().unwrap_or(dot)),
+                "REF" => Cow::Borrowed(record.reference.as_str()),
+                "ALT" => Cow::Borrowed(record.alternate.as_str()),
+                "QUAL" => match record.quality {
+                    Some(q) => Cow::Owned(q.to_string()),
+                    None => Cow::Borrowed(dot),
+                },
+                "FILTER" => Cow::Borrowed(record.filter.as_str()),
                 _ => {
                     if header.starts_with("INFO_")
                         || header.starts_with("CSQ_")
                         || header.starts_with("ANN_")
                     {
-                        record
-                            .info_fields
-                            .get(header)
-                            .unwrap_or(&".".to_string())
-                            .clone()
+                        match record.info_fields.get(header) {
+                            Some(v) => Cow::Borrowed(v.as_str()),
+                            None => Cow::Borrowed(dot),
+                        }
                     } else {
                         if let Some(ref sample_data) = record.format_sample_data {
-                            let mut found_value = None;
+                            let mut found_value: Option<&str> = None;
 
                             for sample in &sample_data.samples {
                                 for format_key in &sample_data.format_keys {
                                     let expected_header =
                                         format!("{}_{}", sample.sample_name, format_key);
                                     if expected_header == *header {
-                                        found_value = sample.format_fields.get(format_key).cloned();
+                                        found_value = sample.format_fields.get(format_key).map(|s| s.as_str());
                                         break;
                                     }
                                 }
@@ -951,9 +991,9 @@ fn write_tsv_content<W: Write>(
                                 }
                             }
 
-                            found_value.unwrap_or(".".to_string())
+                            Cow::Borrowed(found_value.unwrap_or(dot))
                         } else {
-                            ".".to_string()
+                            Cow::Borrowed(dot)
                         }
                     }
                 }
@@ -1113,27 +1153,29 @@ pub fn reformat_vcf_data_with_header_parallel_chunked(
 }
 
 /// Extract values from a record in the same order as headers
-fn extract_values_from_record(record: &ReformattedVcfRecord, headers: &[String]) -> Vec<String> {
+fn extract_values_from_record<'a>(record: &'a ReformattedVcfRecord, headers: &[String]) -> Vec<Cow<'a, str>> {
+    let dot = ".";
     headers
         .iter()
         .map(|header| {
             match header.as_str() {
-                "CHROM" => record.chromosome.clone(),
-                "POS" => record.position.to_string(),
-                "ID" => record.id.as_deref().unwrap_or(".").to_string(),
-                "REF" => record.reference.clone(),
-                "ALT" => record.alternate.clone(),
-                "QUAL" => record.quality.map_or(".".to_string(), |q| q.to_string()),
-                "FILTER" => record.filter.clone(),
+                "CHROM" => Cow::Borrowed(record.chromosome.as_str()),
+                "POS" => Cow::Owned(record.position.to_string()),
+                "ID" => Cow::Borrowed(record.id.as_deref().unwrap_or(dot)),
+                "REF" => Cow::Borrowed(record.reference.as_str()),
+                "ALT" => Cow::Borrowed(record.alternate.as_str()),
+                "QUAL" => match record.quality {
+                    Some(q) => Cow::Owned(q.to_string()),
+                    None => Cow::Borrowed(dot),
+                },
+                "FILTER" => Cow::Borrowed(record.filter.as_str()),
                 _ => {
-                    // Handle INFO fields, CSQ fields, ANN fields, and sample data
                     if let Some(value) = record.info_fields.get(header) {
-                        value.clone()
+                        Cow::Borrowed(value.as_str())
                     } else if let Some(sample_data) = &record.format_sample_data {
-                        // Get sample value for this header
-                        extract_sample_value_for_header(sample_data, header)
+                        extract_sample_value_for_header_cow(sample_data, header)
                     } else {
-                        ".".to_string()
+                        Cow::Borrowed(dot)
                     }
                 }
             }
@@ -1141,20 +1183,18 @@ fn extract_values_from_record(record: &ReformattedVcfRecord, headers: &[String])
         .collect()
 }
 
-/// Helper function to extract sample values by header name
-fn extract_sample_value_for_header(sample_data: &ParsedFormatSample, header: &str) -> String {
-    // Header format: "SAMPLE_NAME_FORMAT_KEY"
+/// Helper function to extract sample values by header name, returning Cow to avoid cloning
+fn extract_sample_value_for_header_cow<'a>(sample_data: &'a ParsedFormatSample, header: &str) -> Cow<'a, str> {
     for sample in &sample_data.samples {
         for format_key in &sample_data.format_keys {
             let expected_header = format!("{}_{}", sample.sample_name, format_key);
             if expected_header == header {
-                return sample
-                    .format_fields
-                    .get(format_key)
-                    .cloned()
-                    .unwrap_or_else(|| ".".to_string());
+                return match sample.format_fields.get(format_key) {
+                    Some(v) => Cow::Borrowed(v.as_str()),
+                    None => Cow::Borrowed("."),
+                };
             }
         }
     }
-    ".".to_string()
+    Cow::Borrowed(".")
 }

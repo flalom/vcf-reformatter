@@ -604,6 +604,7 @@ fn test_write_reformatted_vcf() {
         filter: "PASS".to_string(),
         info_fields: HashMap::new(),
         format_sample_data: None,
+        annotation_field_type: vcf_reformatter::reformat_vcf::AnnotationFieldType::None,
     };
 
     record
@@ -879,6 +880,7 @@ fn test_tsv_output_with_complex_sample_names() {
         filter: "PASS".to_string(),
         info_fields: HashMap::new(),
         format_sample_data: Some(sample_data),
+        annotation_field_type: vcf_reformatter::reformat_vcf::AnnotationFieldType::None,
     };
 
     // Test header generation
@@ -979,7 +981,9 @@ fn test_edge_case_sample_names_with_multiple_underscores() {
 fn test_parse_info_field_empty() {
     let result = parse_info_field("", &None, &None, TranscriptHandling::FirstOnly);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().len(), 1);
+    let (records, field_type) = result.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::None);
 }
 #[test]
 fn test_parse_info_field_no_annotations() {
@@ -993,10 +997,11 @@ fn test_parse_info_field_no_annotations() {
     );
 
     assert!(result.is_ok());
-    let records = result.unwrap();
+    let (records, field_type) = result.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].get("INFO_DP"), Some(&"10".to_string()));
     assert_eq!(records[0].get("INFO_AF"), Some(&"0.5".to_string()));
+    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::None);
 }
 
 #[test]
@@ -1011,7 +1016,7 @@ fn test_parse_info_field_with_csq() {
     );
 
     assert!(result.is_ok());
-    let records = result.unwrap();
+    let (records, field_type) = result.unwrap();
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].get("CSQ_Allele"), Some(&"A".to_string()));
     assert_eq!(
@@ -1019,6 +1024,7 @@ fn test_parse_info_field_with_csq() {
         Some(&"missense_variant".to_string())
     );
     assert_eq!(records[0].get("INFO_DP"), Some(&"10".to_string()));
+    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::Csq);
 }
 
 #[test]
@@ -1058,7 +1064,7 @@ fn test_parse_info_field_with_ann() {
     );
 
     assert!(result.is_ok());
-    let records = result.unwrap();
+    let (records, field_type) = result.unwrap();
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].get("ANN_Allele"), Some(&"T".to_string()));
     assert_eq!(
@@ -1072,6 +1078,7 @@ fn test_parse_info_field_with_ann() {
     assert_eq!(records[0].get("ANN_Gene_Name"), Some(&"BRCA1".to_string()));
     assert_eq!(records[0].get("INFO_DP"), Some(&"15".to_string()));
     assert_eq!(records[0].get("INFO_AF"), Some(&"0.3".to_string()));
+    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::Ann);
 }
 
 //############# add tests for snpeff
@@ -1496,6 +1503,7 @@ fn create_test_maf_record(
         filter: filter.to_string(),
         info_fields,
         format_sample_data: None,
+        annotation_field_type: vcf_reformatter::reformat_vcf::AnnotationFieldType::None,
     }
 }
 
@@ -1627,10 +1635,10 @@ fn test_maf_insertion_positions() {
             .unwrap();
 
     assert_eq!(maf_record.variant_type, "INS");
-    assert_eq!(maf_record.start_position, 1000); // MAF position calculation
-    assert_eq!(maf_record.end_position, 1001); // INS: position + 1
+    assert_eq!(maf_record.start_position, 1000); // Last shared base before insertion
+    assert_eq!(maf_record.end_position, 1001); // INS: start + 1
     assert_eq!(maf_record.reference_allele, "-"); // MAF format uses "-" for insertions
-    assert_eq!(maf_record.tumor_seq_allele2, "ATCG"); // Full alternate allele
+    assert_eq!(maf_record.tumor_seq_allele2, "TCG"); // Inserted bases only (stripped shared "A" prefix)
     assert_eq!(maf_record.chromosome, "1"); // Normalized chromosome
 }
 
@@ -1653,9 +1661,9 @@ fn test_maf_deletion_positions() {
             .unwrap();
 
     assert_eq!(maf_record.variant_type, "DEL");
-    assert_eq!(maf_record.start_position, 2000);
-    assert_eq!(maf_record.end_position, 2003); // pos + ref_len - 1 = 2000 + 4 - 1
-    assert_eq!(maf_record.reference_allele, "ATCG"); // MAF format keeps full reference for deletions
+    assert_eq!(maf_record.start_position, 2001); // First deleted base (after shared "A" anchor)
+    assert_eq!(maf_record.end_position, 2003); // Last deleted base
+    assert_eq!(maf_record.reference_allele, "TCG"); // Deleted bases only (stripped shared "A" prefix)
     assert_eq!(maf_record.tumor_seq_allele2, "-"); // MAF format uses "-" for deletions
     assert_eq!(maf_record.chromosome, "2"); // Normalized chromosome
 }
@@ -1866,9 +1874,10 @@ fn test_maf_edge_cases() {
         MafRecord::from_reformatted_record(&record, "TEST", "GRCh38", "SAMPLE").unwrap();
 
     assert_eq!(maf_record.variant_type, "INS");
-    // Now uses proper MAF format
+    // Proper MAF format: strip shared "A" prefix
     assert_eq!(maf_record.reference_allele, "-");
-    assert_eq!(maf_record.tumor_seq_allele2, long_insertion);
+    let expected_inserted = "T".repeat(100); // "A" + 100x"T" minus shared "A"
+    assert_eq!(maf_record.tumor_seq_allele2, expected_inserted);
 
     // Test with very long deletion
     let long_deletion = "A".to_string() + &"G".repeat(50);
@@ -1887,8 +1896,10 @@ fn test_maf_edge_cases() {
 
     assert_eq!(maf_record.variant_type, "DEL");
     assert_eq!(maf_record.tumor_seq_allele2, "-");
-    assert_eq!(maf_record.reference_allele, long_deletion);
-    assert_eq!(maf_record.end_position, 2000 + 51 - 1); // pos + ref_len - 1
+    let expected_deleted = "G".repeat(50); // "A" + 50x"G" minus shared "A"
+    assert_eq!(maf_record.reference_allele, expected_deleted);
+    assert_eq!(maf_record.start_position, 2001); // First deleted base (after shared "A")
+    assert_eq!(maf_record.end_position, 2050); // 2001 + 50 - 1
 }
 
 #[test]
@@ -2065,6 +2076,264 @@ fn test_maf_intron_and_utr_variants() {
 
     assert_eq!(maf_record.variant_classification, "Intron");
     assert_eq!(maf_record.hugo_symbol, "LINC02593");
+}
+
+#[test]
+fn test_reformatted_record_carries_annotation_type() {
+    use vcf_reformatter::reformat_vcf::AnnotationFieldType;
+
+    let record = create_test_maf_record(
+        "chr1", 1000, "A", "T", Some(30.0), "PASS",
+        HashMap::from([
+            ("CSQ_SYMBOL".to_string(), "BRCA1".to_string()),
+            ("CSQ_Consequence".to_string(), "missense_variant".to_string()),
+        ]),
+    );
+    // This field should exist on ReformattedVcfRecord
+    assert_eq!(record.annotation_field_type, AnnotationFieldType::None);
+}
+
+#[test]
+fn test_maf_snpeff_field_priority_with_annotation_type() {
+    use vcf_reformatter::reformat_vcf::AnnotationFieldType;
+
+    // SnpEff record with ANN_ prefixed fields
+    let mut info = HashMap::new();
+    info.insert("ANN_Gene_Name".to_string(), "TP53".to_string());
+    info.insert("ANN_Annotation".to_string(), "missense_variant".to_string());
+    info.insert("ANN_Annotation_Impact".to_string(), "MODERATE".to_string());
+    info.insert("ANN_Feature_ID".to_string(), "NM_000546.6".to_string());
+    info.insert("ANN_HGVS_p".to_string(), "p.Arg175His".to_string());
+    info.insert("ANN_HGVS_c".to_string(), "c.524G>A".to_string());
+
+    let mut record = create_test_maf_record(
+        "chr17", 7675088, "C", "T", Some(100.0), "PASS", info,
+    );
+    record.annotation_field_type = AnnotationFieldType::Ann;
+
+    let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
+        &record, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+
+    assert_eq!(maf.hugo_symbol, "TP53");
+    assert_eq!(maf.variant_classification, "Missense_Mutation");
+    assert_eq!(maf.transcript_id, Some("NM_000546.6".to_string()));
+    assert_eq!(maf.hgvsp, Some("p.Arg175His".to_string()));
+    assert_eq!(maf.hgvsc, Some("c.524G>A".to_string()));
+}
+
+#[test]
+fn test_maf_snpeff_specific_consequences() {
+    let test_cases = vec![
+        ("disruptive_inframe_insertion", "In_Frame_Ins"),
+        ("conservative_inframe_insertion", "In_Frame_Ins"),
+        ("disruptive_inframe_deletion", "In_Frame_Del"),
+        ("conservative_inframe_deletion", "In_Frame_Del"),
+        ("initiator_codon_variant", "Translation_Start_Site"),
+        ("rare_amino_acid_variant", "Missense_Mutation"),
+        ("stop_retained_variant", "Silent"),
+        ("upstream_gene_variant", "5'Flank"),
+        ("downstream_gene_variant", "3'Flank"),
+        ("non_coding_transcript_exon_variant", "RNA"),
+        ("non_coding_transcript_variant", "RNA"),
+    ];
+
+    for (consequence, expected_classification) in &test_cases {
+        let mut info = HashMap::new();
+        info.insert("ANN_Annotation".to_string(), consequence.to_string());
+        let record = create_test_maf_record(
+            "chr1", 1000, "A", "T", Some(30.0), "PASS", info,
+        );
+        let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
+            &record, "TestCenter", "GRCh38", "SAMPLE-001",
+        ).unwrap();
+        assert_eq!(
+            maf.variant_classification, *expected_classification,
+            "Failed for consequence: {} — expected {}, got {}",
+            consequence, expected_classification, maf.variant_classification
+        );
+    }
+}
+
+#[test]
+fn test_maf_consequence_case_insensitive() {
+    let test_cases = vec![
+        ("STOP_GAINED", "Nonsense_Mutation"),
+        ("Missense_Variant", "Missense_Mutation"),
+        ("FRAMESHIFT_VARIANT", "Frame_Shift_Del"),
+        ("Synonymous_Variant", "Silent"),
+        ("SPLICE_DONOR_VARIANT", "Splice_Site"),
+    ];
+
+    for (consequence, expected) in &test_cases {
+        let mut info = HashMap::new();
+        info.insert("ANN_Annotation".to_string(), consequence.to_string());
+        let record = create_test_maf_record(
+            "chr1", 1000, "A", "T", Some(30.0), "PASS", info,
+        );
+        let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
+            &record, "TestCenter", "GRCh38", "SAMPLE-001",
+        ).unwrap();
+        assert_eq!(
+            maf.variant_classification, *expected,
+            "Failed for consequence: {} — expected {}, got {}",
+            consequence, expected, maf.variant_classification
+        );
+    }
+}
+
+#[test]
+fn test_maf_utr_classification_correctness() {
+    // 5' UTR should map to 5'UTR, not 3'UTR (was a bug in original code)
+    let mut info_5utr = HashMap::new();
+    info_5utr.insert("CSQ_Consequence".to_string(), "5_prime_utr_variant".to_string());
+    let record_5utr = create_test_maf_record(
+        "chr1", 1000, "A", "T", Some(30.0), "PASS", info_5utr,
+    );
+    let maf_5utr = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
+        &record_5utr, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+    assert_eq!(maf_5utr.variant_classification, "5'UTR");
+
+    // 3' UTR should map to 3'UTR
+    let mut info_3utr = HashMap::new();
+    info_3utr.insert("CSQ_Consequence".to_string(), "3_prime_utr_variant".to_string());
+    let record_3utr = create_test_maf_record(
+        "chr1", 1000, "A", "T", Some(30.0), "PASS", info_3utr,
+    );
+    let maf_3utr = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
+        &record_3utr, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+    assert_eq!(maf_3utr.variant_classification, "3'UTR");
+}
+
+#[test]
+fn test_maf_5utr_insertion() {
+    use vcf_reformatter::essentials_fields::MafRecord;
+
+    let mut info = HashMap::new();
+    info.insert("CSQ_Consequence".to_string(), "5_prime_utr_variant".to_string());
+    info.insert("CSQ_SYMBOL".to_string(), "SAMD11".to_string());
+
+    // VCF insertion: ref=A, alt=ATCG at position 924024
+    let record = create_test_maf_record(
+        "chr1", 924024, "A", "ATCG", Some(53.0), "PASS", info,
+    );
+    let maf = MafRecord::from_reformatted_record(
+        &record, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+
+    assert_eq!(maf.variant_classification, "5'UTR");
+    assert_eq!(maf.variant_type, "INS");
+    assert_eq!(maf.reference_allele, "-");
+    assert_eq!(maf.tumor_seq_allele2, "TCG"); // Stripped shared "A" prefix
+    assert_eq!(maf.start_position, 924024); // Last shared base
+    assert_eq!(maf.end_position, 924025); // start + 1
+    assert_eq!(maf.hugo_symbol, "SAMD11");
+}
+
+#[test]
+fn test_maf_5utr_deletion() {
+    use vcf_reformatter::essentials_fields::MafRecord;
+
+    let mut info = HashMap::new();
+    info.insert("ANN_Annotation".to_string(), "5_prime_UTR_variant".to_string());
+    info.insert("ANN_Gene_Name".to_string(), "SAMD11".to_string());
+
+    // VCF deletion: ref=ATCG, alt=A at position 924024
+    let record = create_test_maf_record(
+        "chr1", 924024, "ATCG", "A", Some(40.0), "PASS", info,
+    );
+    let maf = MafRecord::from_reformatted_record(
+        &record, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+
+    assert_eq!(maf.variant_classification, "5'UTR");
+    assert_eq!(maf.variant_type, "DEL");
+    assert_eq!(maf.reference_allele, "TCG"); // Stripped shared "A" prefix
+    assert_eq!(maf.tumor_seq_allele2, "-");
+    assert_eq!(maf.start_position, 924025); // First deleted base
+    assert_eq!(maf.end_position, 924027); // Last deleted base
+    assert_eq!(maf.hugo_symbol, "SAMD11");
+}
+
+#[test]
+fn test_maf_3utr_insertion() {
+    use vcf_reformatter::essentials_fields::MafRecord;
+
+    let mut info = HashMap::new();
+    info.insert("CSQ_Consequence".to_string(), "3_prime_utr_variant".to_string());
+    info.insert("CSQ_SYMBOL".to_string(), "OR4F5".to_string());
+
+    let record = create_test_maf_record(
+        "chr1", 69511, "G", "GAA", Some(100.0), "PASS", info,
+    );
+    let maf = MafRecord::from_reformatted_record(
+        &record, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+
+    assert_eq!(maf.variant_classification, "3'UTR");
+    assert_eq!(maf.variant_type, "INS");
+    assert_eq!(maf.reference_allele, "-");
+    assert_eq!(maf.tumor_seq_allele2, "AA"); // Stripped shared "G"
+}
+
+#[test]
+fn test_maf_frameshift_ins_vs_del() {
+    use vcf_reformatter::essentials_fields::MafRecord;
+
+    // Frameshift insertion: ref shorter than alt
+    let mut info_ins = HashMap::new();
+    info_ins.insert("CSQ_Consequence".to_string(), "frameshift_variant".to_string());
+    let record_ins = create_test_maf_record(
+        "chr1", 1000, "A", "ATCG", Some(50.0), "PASS", info_ins,
+    );
+    let maf_ins = MafRecord::from_reformatted_record(
+        &record_ins, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+    assert_eq!(maf_ins.variant_classification, "Frame_Shift_Ins");
+    assert_eq!(maf_ins.variant_type, "INS");
+
+    // Frameshift deletion: ref longer than alt
+    let mut info_del = HashMap::new();
+    info_del.insert("CSQ_Consequence".to_string(), "frameshift_variant".to_string());
+    let record_del = create_test_maf_record(
+        "chr1", 1000, "ATCG", "A", Some(50.0), "PASS", info_del,
+    );
+    let maf_del = MafRecord::from_reformatted_record(
+        &record_del, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+    assert_eq!(maf_del.variant_classification, "Frame_Shift_Del");
+    assert_eq!(maf_del.variant_type, "DEL");
+
+    // Frameshift SNP-like (same length): defaults to Del
+    let mut info_snp = HashMap::new();
+    info_snp.insert("CSQ_Consequence".to_string(), "frameshift_variant".to_string());
+    let record_snp = create_test_maf_record(
+        "chr1", 1000, "AT", "GC", Some(50.0), "PASS", info_snp,
+    );
+    let maf_snp = MafRecord::from_reformatted_record(
+        &record_snp, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+    assert_eq!(maf_snp.variant_classification, "Frame_Shift_Del");
+}
+
+#[test]
+fn test_maf_classification_impact_not_used_as_consequence() {
+    // Only provide IMPACT, not actual consequence
+    let mut info = HashMap::new();
+    info.insert("ANN_Annotation_Impact".to_string(), "HIGH".to_string());
+    // No ANN_Annotation or CSQ_Consequence
+
+    let record = create_test_maf_record(
+        "chr1", 1000, "A", "T", Some(30.0), "PASS", info,
+    );
+    let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
+        &record, "TestCenter", "GRCh38", "SAMPLE-001",
+    ).unwrap();
+
+    // Should use IMPACT fallback path, not try to map "HIGH" as a consequence term
+    assert_eq!(maf.variant_classification, "Missense_Mutation"); // HIGH impact fallback
 }
 
 #[test]
@@ -2258,10 +2527,10 @@ fn test_maf_multi_allelic_conversion() {
 
     assert_eq!(maf_record.variant_type, "INS");
     assert_eq!(maf_record.start_position, 1000);
-    assert_eq!(maf_record.end_position, 1001); // Multi version uses MAF position calculation
-    assert_eq!(maf_record.reference_allele, "-"); // Multi version uses MAF allele conversion
-    assert_eq!(maf_record.tumor_seq_allele2, "ATCG");
-    assert_eq!(maf_record.chromosome, "1"); // Multi version normalizes chromosome
+    assert_eq!(maf_record.end_position, 1001);
+    assert_eq!(maf_record.reference_allele, "-");
+    assert_eq!(maf_record.tumor_seq_allele2, "TCG"); // Stripped shared "A" prefix
+    assert_eq!(maf_record.chromosome, "1");
 }
 
 #[test]
@@ -2286,11 +2555,11 @@ fn test_maf_multi_deletion_conversion() {
     let maf_record = &maf_records[0];
 
     assert_eq!(maf_record.variant_type, "DEL");
-    assert_eq!(maf_record.start_position, 2000);
-    assert_eq!(maf_record.end_position, 2003); // pos + ref_len - 1
-    assert_eq!(maf_record.reference_allele, "ATCG"); // Multi version uses original reference for DEL
-    assert_eq!(maf_record.tumor_seq_allele2, "-"); // Multi version uses "-" for deletion
-    assert_eq!(maf_record.chromosome, "2"); // Multi version normalizes chromosome
+    assert_eq!(maf_record.start_position, 2001); // First deleted base
+    assert_eq!(maf_record.end_position, 2003); // Last deleted base
+    assert_eq!(maf_record.reference_allele, "TCG"); // Stripped shared "A" prefix
+    assert_eq!(maf_record.tumor_seq_allele2, "-");
+    assert_eq!(maf_record.chromosome, "2");
 }
 
 use std::process::Command;

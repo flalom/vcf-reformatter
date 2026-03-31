@@ -186,7 +186,7 @@ impl MafRecord {
             start_position: start_pos,                                  // Use MAF positions
             end_position: end_pos,                                      // Use MAF positions
             strand: Self::get_strand(&record.info_fields),
-            variant_classification: Self::get_variant_classification(&record.info_fields),
+            variant_classification: Self::get_variant_classification(&record.info_fields, &variant_type),
             variant_type,
             reference_allele: ref_allele, // Use MAF alleles
             tumor_seq_allele1,            // Use MAF alleles
@@ -266,6 +266,7 @@ impl MafRecord {
                 filter: record.filter.clone(),
                 info_fields: record.info_fields.clone(),
                 format_sample_data: record.format_sample_data.clone(),
+                annotation_field_type: record.annotation_field_type,
             };
 
             // Use the unified conversion logic
@@ -482,14 +483,38 @@ impl MafRecord {
     fn calculate_maf_positions(
         position: u64,
         reference: &str,
-        _alternate: &str,
+        alternate: &str,
         variant_type: &str,
     ) -> (u64, u64) {
+        // VCF indels have a shared anchor base prefix. MAF positions refer to
+        // the actual inserted/deleted bases, not the anchor.
+        // Note: VCF alleles are ASCII (A/C/G/T), so chars().count() == byte length.
+        let shared_prefix_len = reference
+            .chars()
+            .zip(alternate.chars())
+            .take_while(|(r, a)| r == a)
+            .count() as u64;
+
         match variant_type {
-            "INS" => (position, position + 1),
+            "INS" => {
+                // Insertion: start = last shared base, end = start + 1
+                // Guard against malformed VCF with no anchor base (shared_prefix_len == 0)
+                let start = if shared_prefix_len > 0 {
+                    position + shared_prefix_len - 1
+                } else {
+                    position
+                };
+                (start, start + 1)
+            }
             "DEL" => {
-                let end_pos = position + reference.len() as u64 - 1;
-                (position, end_pos.max(position))
+                // Deletion: start = first deleted base, end = last deleted base
+                let deleted_len = reference.len() as u64 - shared_prefix_len;
+                if deleted_len == 0 {
+                    return (position, position);
+                }
+                let start = position + shared_prefix_len;
+                let end = start + deleted_len - 1;
+                (start, end.max(start))
             }
             _ => (position, position),
         }
@@ -500,13 +525,24 @@ impl MafRecord {
         alternate: &str,
         variant_type: &str,
     ) -> (String, String, String) {
+        // VCF indels include a shared anchor base that MAF strips out.
+        // E.g., VCF ref=A alt=ATCG → MAF ref="-" alt="TCG"
+        //       VCF ref=ATCG alt=A → MAF ref="TCG" alt="-"
+        let shared_prefix_len = reference
+            .chars()
+            .zip(alternate.chars())
+            .take_while(|(r, a)| r == a)
+            .count();
+
         match variant_type {
-            "INS" => ("-".to_string(), "-".to_string(), alternate.to_string()),
-            "DEL" => (
-                reference.to_string(),
-                reference.to_string(),
-                "-".to_string(),
-            ),
+            "INS" => {
+                let inserted = &alternate[shared_prefix_len..];
+                ("-".to_string(), "-".to_string(), inserted.to_string())
+            }
+            "DEL" => {
+                let deleted = &reference[shared_prefix_len..];
+                (deleted.to_string(), deleted.to_string(), "-".to_string())
+            }
             _ => (
                 reference.to_string(),
                 reference.to_string(),
@@ -527,20 +563,19 @@ impl MafRecord {
         }
     }
 
-    fn get_variant_classification(info_fields: &HashMap<String, String>) -> String {
+    fn get_variant_classification(info_fields: &HashMap<String, String>, variant_type: &str) -> String {
         if let Some(consequence) = Self::get_annotation_field(
             info_fields,
             &[
                 "CSQ_Consequence",
                 "ANN_Annotation",
-                "ANN_Annotation_Impact",
                 "Consequence",
                 "Annotation",
                 "Effect",
                 "Variant_Effect",
             ],
         ) {
-            Self::map_consequence_to_maf(&consequence, info_fields)
+            Self::map_consequence_to_maf(&consequence, info_fields, variant_type)
         } else {
             // Fallback: check IMPACT field directly
             if let Some(impact) = Self::get_annotation_field(
@@ -560,7 +595,7 @@ impl MafRecord {
         }
     }
 
-    fn map_consequence_to_maf(consequence: &str, info_fields: &HashMap<String, String>) -> String {
+    fn map_consequence_to_maf(consequence: &str, info_fields: &HashMap<String, String>, variant_type: &str) -> String {
         let consequence_lower = consequence.to_lowercase();
 
         // Handle multiple consequences separated by &, |, or ,
@@ -569,52 +604,82 @@ impl MafRecord {
             .map(|s| s.trim())
             .collect();
 
-        // Find the most severe consequence
+        // Find the most severe consequence (ordered by severity: HIGH > MODERATE > LOW > MODIFIER)
         for cons in &consequences {
-            // High impact
+            // === HIGH IMPACT ===
             if cons.contains("stop_gained") || cons.contains("nonsense") {
                 return "Nonsense_Mutation".to_string();
-            } else if cons.contains("missense") || cons.contains("missense_variant") {
-                return "Missense_Mutation".to_string();
-            } else if cons.contains("frameshift") {
-                return "Frame_Shift_Del".to_string();
-            } else if cons.contains("splice")
+            }
+            if cons.contains("frameshift") {
+                return if variant_type == "INS" {
+                    "Frame_Shift_Ins".to_string()
+                } else {
+                    "Frame_Shift_Del".to_string()
+                };
+            }
+            if cons.contains("splice")
                 && (cons.contains("acceptor") || cons.contains("donor"))
             {
                 return "Splice_Site".to_string();
             }
-            // Medium impact variants
-            else if cons.contains("inframe_insertion") {
-                return "In_Frame_Ins".to_string();
-            } else if cons.contains("inframe_deletion") {
-                return "In_Frame_Del".to_string();
-            } else if cons.contains("stop_lost") {
-                return "Nonstop_Mutation".to_string();
-            } else if cons.contains("start_lost") {
+            if cons.contains("start_lost") || cons.contains("initiator_codon_variant") {
                 return "Translation_Start_Site".to_string();
             }
-            // Low imp
-            else if cons.contains("synonymous") || cons.contains("silent") {
-                return "Silent".to_string();
-            } else if cons.contains("5_prime_utr")
-                || cons.contains("3_prime_utr")
-                || cons.contains("utr")
-            {
-                return "3'UTR".to_string();
+            if cons.contains("stop_lost") {
+                return "Nonstop_Mutation".to_string();
             }
-            // Splice region variants
-            else if cons.contains("splice_region") {
+
+            // === MODERATE IMPACT ===
+            if cons.contains("missense") || cons.contains("rare_amino_acid_variant") {
+                return "Missense_Mutation".to_string();
+            }
+            if cons.contains("inframe_insertion") {
+                return "In_Frame_Ins".to_string();
+            }
+            if cons.contains("inframe_deletion") {
+                return "In_Frame_Del".to_string();
+            }
+
+            // === LOW IMPACT ===
+            if cons.contains("synonymous") || cons.contains("silent")
+                || cons.contains("stop_retained_variant")
+            {
+                return "Silent".to_string();
+            }
+            if cons.contains("splice_region") {
                 return "Splice_Region".to_string();
             }
-            // Intronic and intergenic
-            else if cons.contains("intronic") || cons.contains("intron") {
+
+            // === UTR / FLANKING ===
+            // Check specific UTR types before generic "utr" to avoid misclassification
+            if cons.contains("5_prime_utr") {
+                return "5'UTR".to_string();
+            }
+            if cons.contains("3_prime_utr") {
+                return "3'UTR".to_string();
+            }
+            if cons.contains("upstream_gene_variant") {
+                return "5'Flank".to_string();
+            }
+            if cons.contains("downstream_gene_variant") {
+                return "3'Flank".to_string();
+            }
+
+            // === NON-CODING / RNA ===
+            if cons.contains("non_coding_transcript") {
+                return "RNA".to_string();
+            }
+
+            // === INTRONIC / INTERGENIC ===
+            if cons.contains("intronic") || cons.contains("intron") {
                 return "Intron".to_string();
-            } else if cons.contains("intergenic") {
+            }
+            if cons.contains("intergenic") {
                 return "IGR".to_string();
             }
         }
 
-        // If no specific consequence matched, check VEP IMPACT field as fallback
+        // Fallback: check IMPACT field
         if let Some(impact) = Self::get_annotation_field(
             info_fields,
             &["CSQ_IMPACT", "ANN_Annotation_Impact", "IMPACT"],
@@ -672,54 +737,46 @@ impl MafRecord {
     }
 
     pub fn to_tsv_line(&self) -> String {
-        vec![
-            self.hugo_symbol.clone(),
-            self.entrez_gene_id
-                .map_or(".".to_string(), |id| id.to_string()),
-            self.center.clone(),
-            self.ncbi_build.clone(),
-            self.chromosome.clone(),
-            self.start_position.to_string(),
-            self.end_position.to_string(),
-            self.strand.clone(),
-            self.variant_classification.clone(),
-            self.variant_type.clone(),
-            self.reference_allele.clone(),
-            self.tumor_seq_allele1.clone(),
-            self.tumor_seq_allele2.clone(),
-            self.dbsnp_rs.as_ref().unwrap_or(&".".to_string()).clone(),
-            self.dbsnp_val_status
-                .as_ref()
-                .unwrap_or(&".".to_string())
-                .clone(),
-            self.tumor_sample_barcode.clone(),
-            self.matched_norm_sample_barcode
-                .as_ref()
-                .unwrap_or(&".".to_string())
-                .clone(),
-            self.mutation_status.clone(),
-            self.validation_status
-                .as_ref()
-                .unwrap_or(&".".to_string())
-                .clone(),
-            self.sequencer.as_ref().unwrap_or(&".".to_string()).clone(),
-            self.sequence_source.clone(),
-            self.depth.map_or(".".to_string(), |d| d.to_string()),
-            self.total_depth.map_or(".".to_string(), |d| d.to_string()),
-            self.vaf.map_or(".".to_string(), |v| format!("{:.4}", v)),
-            self.hgvsp.as_ref().unwrap_or(&".".to_string()).clone(),
-            self.hgvsc.as_ref().unwrap_or(&".".to_string()).clone(),
-            // NEW FIELDS OUTPUT
-            self.qual.map_or(".".to_string(), |q| q.to_string()), // QUAL score
-            self.filter_status.clone(),                           // FILTER status
-            self.transcript_id
-                .as_ref()
-                .unwrap_or(&".".to_string())
-                .clone(), // Transcript ID
-            self.protein_position
-                .as_ref()
-                .unwrap_or(&".".to_string())
-                .clone(), // Protein position
+        let dot = ".";
+        let entrez = self.entrez_gene_id.map(|id| id.to_string());
+        let start = self.start_position.to_string();
+        let end = self.end_position.to_string();
+        let depth = self.depth.map(|d| d.to_string());
+        let total_depth = self.total_depth.map(|d| d.to_string());
+        let vaf = self.vaf.map(|v| format!("{:.4}", v));
+        let qual = self.qual.map(|q| q.to_string());
+
+        [
+            self.hugo_symbol.as_str(),
+            entrez.as_deref().unwrap_or(dot),
+            self.center.as_str(),
+            self.ncbi_build.as_str(),
+            self.chromosome.as_str(),
+            start.as_str(),
+            end.as_str(),
+            self.strand.as_str(),
+            self.variant_classification.as_str(),
+            self.variant_type.as_str(),
+            self.reference_allele.as_str(),
+            self.tumor_seq_allele1.as_str(),
+            self.tumor_seq_allele2.as_str(),
+            self.dbsnp_rs.as_deref().unwrap_or(dot),
+            self.dbsnp_val_status.as_deref().unwrap_or(dot),
+            self.tumor_sample_barcode.as_str(),
+            self.matched_norm_sample_barcode.as_deref().unwrap_or(dot),
+            self.mutation_status.as_str(),
+            self.validation_status.as_deref().unwrap_or(dot),
+            self.sequencer.as_deref().unwrap_or(dot),
+            self.sequence_source.as_str(),
+            depth.as_deref().unwrap_or(dot),
+            total_depth.as_deref().unwrap_or(dot),
+            vaf.as_deref().unwrap_or(dot),
+            self.hgvsp.as_deref().unwrap_or(dot),
+            self.hgvsc.as_deref().unwrap_or(dot),
+            qual.as_deref().unwrap_or(dot),
+            self.filter_status.as_str(),
+            self.transcript_id.as_deref().unwrap_or(dot),
+            self.protein_position.as_deref().unwrap_or(dot),
         ]
         .join("\t")
     }
