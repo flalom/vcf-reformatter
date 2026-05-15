@@ -1,6 +1,6 @@
 [package]
 name = "vcf-reformatter"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Fast VCF file parser and reformatter with VEP and SnpEff annotation support which can output to MAF"
 authors = ["Flavio Lombardo <fl@flaviolombardo.site>"]
@@ -19,7 +19,7 @@ include = [
 ]
 
 [features]
-default = []
+default = ["parquet_out"]
 parquet_out = ["dep:arrow", "dep:parquet"]
 
 [dependencies]

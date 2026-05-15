@@ -535,7 +535,7 @@ fn main() {
             };
 
             match result {
-                Ok((headers, records)) => {
+                Ok((_headers, records)) => {
                     let process_time = process_start.elapsed();
                     let variants_per_sec = data.2.len() as f64 / process_time.as_secs_f64();
                     println!("✅ Data processing completed in {process_time:.2?}");
@@ -566,7 +566,7 @@ fn main() {
                         let parquet_file = reformatted_file
                             .replace(".tsv.gz", ".parquet")
                             .replace(".tsv", ".parquet");
-                        match parquet_writer::write_tsv_as_parquet(&parquet_file, &headers, &records) {
+                        match parquet_writer::write_tsv_as_parquet(&parquet_file, &_headers, &records) {
                             Ok(()) => println!("✅ Parquet file written: {}", parquet_file),
                             Err(e) => {
                                 eprintln!("❌ Error writing parquet file: {e}");
@@ -834,7 +834,7 @@ fn print_startup_info(
     _annotation_type: AnnotationType,
 ) {
     // Welcome messages
-    println!("🧬 VCF REFORMATTER v0.3.0");
+    println!("🧬 VCF REFORMATTER v0.4.0");
     println!("═══════════════════════════");
     println!("📁 Input file: {}", cli.input_file);
     println!("🧵 Transcript handling: {:?}", transcript_handling);

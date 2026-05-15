@@ -330,7 +330,7 @@ impl MafRecord {
                 _ => "+".to_string(),
             }
         } else {
-            "*".to_string()
+            "+".to_string() // MAF spec requires + or -, default to +
         }
     }
 
@@ -668,6 +668,11 @@ impl MafRecord {
             // === NON-CODING / RNA ===
             if cons.contains("non_coding_transcript") {
                 return "RNA".to_string();
+            }
+
+            // === REGULATORY ===
+            if cons.contains("regulatory_region") || cons.contains("tf_binding_site") {
+                return "Targeted_Region".to_string();
             }
 
             // === INTRONIC / INTERGENIC ===
