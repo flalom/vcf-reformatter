@@ -67,7 +67,11 @@ struct MafConfig {
 struct ProcessingTiming {
     read_time: std::time::Duration,
     process_time: std::time::Duration,
-    write_time: std::time::Duration,
+    /// `None` when writing is streamed inline with processing and has no
+    /// separately measurable duration (e.g. TSV chunked/parallel output).
+    write_time: Option<std::time::Duration>,
+    /// `None` for MAF output, which has no separate header file.
+    header_write_time: Option<std::time::Duration>,
     total_time: std::time::Duration,
 }
 
@@ -81,7 +85,7 @@ struct ProcessingStats {
 #[derive(Parser)]
 #[command(
     name = "vcf-reformatter",
-    version = "0.3.0",
+    version,
     about = "🧬 Fast VCF file parser and reformatter with VEP and SnpEff annotation support",
     long_about = "A Rust command-line tool for parsing and reformatting VCF (Variant Call Format) files, with support for VEP (Variant Effect Predictor) and SnpEff annotations. This tool flattens complex VCF files into tab-separated values (TSV) or Mutation Annotation Format (MAF) for easier downstream analysis.",
     after_help = "EXAMPLES:
@@ -107,7 +111,7 @@ struct ProcessingStats {
       vcf-reformatter sample.vcf.gz -a snpeff -t most-severe -j 4 -o results/ -p my_analysis -v --compress"
 )]
 struct Cli {
-    /// Input VCF file (supports .vcf.gz compressed files)
+    /// Input VCF file (supports .vcf.gz compressed files), or "-" to read from stdin
     #[arg(value_name = "INPUT_FILE")]
     input_file: String,
 
@@ -228,9 +232,6 @@ fn extract_maf_metadata_from_header(header: &str, column_line: &str) -> MafMetad
         sample_names: Vec::new(),
         primary_sample: None,
     };
-    // Set better default values
-    metadata.center = Some("Unknown_Center".to_string());
-    metadata.ncbi_build = Some("GRCh38".to_string()); // reasonable default
 
     for line in header.lines() {
         if line.starts_with("##reference=") {
@@ -328,8 +329,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Validate input file
-    if !Path::new(&cli.input_file).exists() {
+    // Validate input file ("-" means read from stdin, so it has no path to check)
+    if cli.input_file != "-" && !Path::new(&cli.input_file).exists() {
         eprintln!("❌ Error: File '{}' not found", cli.input_file);
         std::process::exit(1);
     }
@@ -401,6 +402,15 @@ fn main() {
     println!("✅ File read completed in {read_time:.2?}");
     println!("   📊 Total variants: {}", data.2.len());
     println!("   📑 Header lines: {}", data.0.matches('\n').count());
+
+    let multiallelic_count = summary::count_multiallelic_sites(&data.2);
+    if multiallelic_count > 0 {
+        eprintln!(
+            "⚠️  Warning: {multiallelic_count} multiallelic site(s) detected (ALT field lists more than one allele)."
+        );
+        eprintln!("   Each alternate allele is expanded into its own output record.");
+        eprintln!("   To get one ALT per line instead, normalize first: bcftools norm -m- <input>");
+    }
 
     if cli.verbose && data.2.len() > 50_000 {
         println!(
@@ -591,8 +601,9 @@ fn main() {
                         );
                     }
 
-                    // File writing is already handled above for streaming case
-                    let write_time = std::time::Duration::from_millis(10); // Nominal time for streamed files
+                    // Writing is streamed inline with processing above, so it has
+                    // no separately measurable duration.
+                    let write_time = None;
                     let total_time = total_start.elapsed();
                     println!(
                         "✅ Output file ready: {}{}",
@@ -606,6 +617,7 @@ fn main() {
                         read_time,
                         process_time,
                         write_time,
+                        header_write_time: Some(header_write_time),
                         total_time,
                     };
 
@@ -622,7 +634,6 @@ fn main() {
                         &data,
                         &records,
                         &timing,
-                        header_write_time,
                         &stats,
                     );
                 }
@@ -750,7 +761,8 @@ fn main() {
             let timing = ProcessingTiming {
                 read_time,
                 process_time,
-                write_time,
+                write_time: Some(write_time),
+                header_write_time: None,
                 total_time,
             };
 
@@ -765,24 +777,23 @@ fn main() {
     }
 }
 
-fn generate_maf_output_filename(cli: &Cli) -> String {
-    let input_path = Path::new(&cli.input_file);
-    let base_name = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("Invalid input filename")
-        .unwrap();
-
-    let base_name = if let Some(_stripped) = base_name.strip_suffix(".vcf") {
-        &base_name[..base_name.len() - 4]
+/// Build an output path under `cli.output_dir`, using `cli.prefix` (or the
+/// input file's stem) as the base name, creating the directory if needed.
+fn output_path(cli: &Cli, suffix: &str, extension: &str) -> String {
+    let base_name = if cli.input_file == "-" {
+        "stdin"
     } else {
-        base_name
+        let input_path = Path::new(&cli.input_file);
+        let base_name = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        base_name.strip_suffix(".vcf").unwrap_or(base_name)
     };
 
     let output_dir = cli.output_dir.as_deref().unwrap_or(".");
     let prefix = cli.prefix.as_deref().unwrap_or(base_name);
 
-    // Create output directory if it doesn't exist
     if let Err(e) = std::fs::create_dir_all(output_dir) {
         eprintln!(
             "⚠️  Warning: Could not create output directory '{}': {}",
@@ -790,8 +801,12 @@ fn generate_maf_output_filename(cli: &Cli) -> String {
         );
     }
 
+    format!("{}/{}{}.{}", output_dir, prefix, suffix, extension)
+}
+
+fn generate_maf_output_filename(cli: &Cli) -> String {
     let extension = if cli.compress { "maf.gz" } else { "maf" };
-    format!("{}/{}_reformatted.{}", output_dir, prefix, extension)
+    output_path(cli, "_reformatted", extension)
 }
 
 fn print_maf_summary(
@@ -810,7 +825,9 @@ fn print_maf_summary(
     println!("─────────────────────────");
     println!("📖 File reading:    {:.2?}", timing.read_time);
     println!("🔄 Data processing:  {:.2?}", timing.process_time);
-    println!("💾 File writing:     {:.2?}", timing.write_time);
+    if let Some(write_time) = timing.write_time {
+        println!("💾 File writing:     {:.2?}", write_time);
+    }
     println!("⏱️  Total time:       {:.2?}", timing.total_time);
     println!();
     println!("📈 PERFORMANCE METRICS:");
@@ -887,42 +904,15 @@ fn detect_and_print_annotation_type(
 }
 
 fn generate_output_filenames(cli: &Cli) -> (String, String) {
-    let input_path = Path::new(&cli.input_file);
-    let base_name = input_path.file_stem().unwrap().to_str().unwrap();
-    let base_name = if let Some(_stripped) = base_name.strip_suffix(".vcf") {
-        &base_name[..base_name.len() - 4]
-    } else {
-        base_name
-    };
-
-    let output_dir = cli.output_dir.as_deref().unwrap_or(".");
-    let prefix = cli.prefix.as_deref().unwrap_or(base_name);
-
-    // Create output directory if it doesn't exist
-    if let Err(e) = std::fs::create_dir_all(output_dir) {
-        eprintln!(
-            "⚠️  Warning: Could not create output directory '{}': {}",
-            output_dir, e
-        );
-    }
-
-    let header_file = format!("{}/{}_header.txt", output_dir, prefix);
     let extension = if cli.compress { "tsv.gz" } else { "tsv" };
-    let reformatted_file = format!("{}/{}_reformatted.{}", output_dir, prefix, extension);
-
-    (header_file, reformatted_file)
+    (
+        output_path(cli, "_header", "txt"),
+        output_path(cli, "_reformatted", extension),
+    )
 }
 
 fn generate_summary_filename(cli: &Cli) -> String {
-    let input_path = Path::new(&cli.input_file);
-    let base_name = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let base_name = base_name.strip_suffix(".vcf").unwrap_or(base_name);
-    let output_dir = cli.output_dir.as_deref().unwrap_or(".");
-    let prefix = cli.prefix.as_deref().unwrap_or(base_name);
-    format!("{}/{}_summary.txt", output_dir, prefix)
+    output_path(cli, "_summary", "txt")
 }
 
 fn write_summary_if_requested(
@@ -979,7 +969,6 @@ fn write_header_file(filename: &str, header: &str, variant_count: usize) -> std:
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn print_final_summary(
     cli: &Cli,
     header_file: &str,
@@ -987,7 +976,6 @@ fn print_final_summary(
     data: &(String, String, Vec<String>),
     records: &[reformat_vcf::ReformattedVcfRecord],
     timing: &ProcessingTiming,
-    header_write_time: std::time::Duration,
     stats: &ProcessingStats,
 ) {
     println!("🎉 PROCESSING COMPLETED SUCCESSFULLY!");
@@ -999,9 +987,13 @@ fn print_final_summary(
     println!("📊 STATISTICS:");
     println!("──────────────");
     println!("📖 File reading:     {:.2?}", timing.read_time);
-    println!("📝 Header writing:   {:.2?}", header_write_time);
+    if let Some(header_write_time) = timing.header_write_time {
+        println!("📝 Header writing:   {:.2?}", header_write_time);
+    }
     println!("🔄 Data processing:  {:.2?}", timing.process_time);
-    println!("💾 File writing:     {:.2?}", timing.write_time);
+    if let Some(write_time) = timing.write_time {
+        println!("💾 File writing:     {:.2?}", write_time);
+    }
     println!("⏱️  Total time:       {:.2?}", timing.total_time);
     println!();
     println!("📈 PERFORMANCE:");

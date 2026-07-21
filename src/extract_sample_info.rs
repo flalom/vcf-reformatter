@@ -61,30 +61,6 @@ impl ParsedFormatSample {
         headers
     }
 
-    pub fn _get_values_for_samples(&self) -> Vec<String> {
-        let mut values = Vec::new();
-        let default_value = ".".to_string();
-
-        for sample in &self.samples {
-            for format_key in &self.format_keys {
-                let value = sample
-                    .format_fields
-                    .get(format_key)
-                    .unwrap_or(&default_value);
-                values.push(value.clone());
-            }
-        }
-
-        values
-    }
-
-    pub fn _get_all_format_keys(&self) -> Vec<String> {
-        self.format_keys.clone()
-    }
-
-    pub fn _get_sample_names(&self) -> Vec<String> {
-        self.samples.iter().map(|s| s.sample_name.clone()).collect()
-    }
 }
 
 // Alias for backward compatibility with tests

@@ -2,89 +2,7 @@ use crate::extract_sample_info::ParsedFormatSample;
 use crate::reformat_vcf::ReformattedVcfRecord;
 use std::collections::HashMap;
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct VcfVariant {
-    pub chromosome: String,
-    pub position: u64,
-    pub id: Option<String>,
-    pub reference: String,
-    pub alternate: String,
-    pub quality: Option<f64>,
-    pub filter: String,
-    pub info: String,
-    pub format: Option<String>,
-    pub samples: Vec<String>,
-}
-
-impl VcfVariant {
-    #[allow(dead_code)]
-    pub fn from_line(
-        line: &str,
-        _column_names: &[&str],
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let fields: Vec<&str> = line.split('\t').collect();
-
-        if fields.len() < 8 {
-            return Err("VCF line has too few fields".into());
-        }
-
-        let chromosome = fields[0].to_string();
-        let position = fields[1].parse::<u64>()?;
-        let id = if fields[2] == "." {
-            None
-        } else {
-            Some(fields[2].to_string())
-        };
-        let reference = fields[3].to_string();
-        let alternate = fields[4].to_string();
-        let quality = if fields[5] == "." {
-            None
-        } else {
-            Some(fields[5].parse::<f64>()?)
-        };
-        let filter = fields[6].to_string();
-        let info = fields[7].to_string();
-
-        let format = if fields.len() > 8 {
-            Some(fields[8].to_string())
-        } else {
-            None
-        };
-        let samples = if fields.len() > 9 {
-            fields[9..].iter().map(|s| s.to_string()).collect()
-        } else {
-            Vec::new()
-        };
-
-        Ok(VcfVariant {
-            chromosome,
-            position,
-            id,
-            reference,
-            alternate,
-            quality,
-            filter,
-            info,
-            format,
-            samples,
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn get_info_field(&self, field_name: &str) -> Option<String> {
-        for pair in self.info.split(';') {
-            if let Some((key, value)) = pair.split_once('=') {
-                if key == field_name {
-                    return Some(value.to_string());
-                }
-            } else if pair == field_name {
-                return Some("true".to_string());
-            }
-        }
-        None
-    }
-}
+type ClassificationRule = (fn(&str) -> bool, &'static str);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MafRecord {
@@ -165,14 +83,7 @@ impl MafRecord {
         Ok(MafRecord {
             hugo_symbol: Self::get_annotation_field(
                 &record.info_fields,
-                &[
-                    "ANN_Gene_Name", // SnpEff primary
-                    "CSQ_SYMBOL",
-                    "ANN_SYMBOL",
-                    "SYMBOL",
-                    "Gene_Name",
-                    "Gene",
-                ],
+                &["ANN_Gene_Name", "CSQ_SYMBOL", "ANN_SYMBOL"],
             )
             .unwrap_or(".".to_string()),
             entrez_gene_id: Self::get_entrez_gene_id(&record.info_fields),
@@ -202,16 +113,10 @@ impl MafRecord {
             depth: tumor_depth,
             total_depth,
             vaf,
-            hgvsp: Self::get_annotation_field(
-                &record.info_fields,
-                &["CSQ_HGVSp", "ANN_HGVS_p", "HGVSp", "HGVS_p"],
-            )
-            .filter(|s| s != "."),
-            hgvsc: Self::get_annotation_field(
-                &record.info_fields,
-                &["CSQ_HGVSc", "ANN_HGVS_c", "HGVSc", "HGVS_c"],
-            )
-            .filter(|s| s != "."),
+            hgvsp: Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSp", "ANN_HGVS_p"])
+                .filter(|s| s != "."),
+            hgvsc: Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSc", "ANN_HGVS_c"])
+                .filter(|s| s != "."),
             qual: record.quality,
             filter_status: record.filter.clone(),
             transcript_id: Self::get_transcript_id(&record.info_fields),
@@ -316,14 +221,7 @@ impl MafRecord {
     }
 
     fn get_strand(info_fields: &HashMap<String, String>) -> String {
-        if let Some(strand) = Self::get_annotation_field(
-            info_fields,
-            &[
-                "CSQ_STRAND", // VEP
-                "ANN_Strand", // SnpEff (rare)
-                "STRAND",     // Generic
-            ],
-        ) {
+        if let Some(strand) = Self::get_annotation_field(info_fields, &["CSQ_STRAND", "ANN_Strand"]) {
             match strand.as_str() {
                 "1" | "+" => "+".to_string(),
                 "-1" | "-" => "-".to_string(),
@@ -343,16 +241,8 @@ impl MafRecord {
             }
         }
 
-        Self::get_annotation_field(
-            info_fields,
-            &[
-                "ENTREZ_GENE_ID", // Direct field (rare)
-                "ANN_Entrez_ID",  // SnpEff Entrez (rare)
-                "CSQ_Gene",       // VEP Gene ID
-                "Gene_ID",        // Generic
-            ],
-        )
-        .and_then(|id| id.parse().ok())
+        Self::get_annotation_field(info_fields, &["ANN_Entrez_ID", "CSQ_Gene"])
+            .and_then(|id| id.parse().ok())
     }
 
     fn extract_depth_from_sample_data(
@@ -394,51 +284,12 @@ impl MafRecord {
     }
 
     fn extract_total_depth(info_fields: &HashMap<String, String>) -> Option<u32> {
-        // Try different field names for total depth
-        Self::get_annotation_field(
-            info_fields,
-            &[
-                "INFO_DP",
-                "DP",
-                "TotalDepth",
-                "DEPTH",
-                "Total_Depth",
-                "INFO_DEPTH",
-                // SnpEff specific fields
-                "ANN_DP",
-                "ANN_TotalDepth",
-                // Sample-based depth (might be prefixed)
-                "SAMPLE_DP",
-                "FORMAT_DP",
-            ],
-        )
-        .and_then(|s| s.parse().ok())
+        Self::get_annotation_field(info_fields, &["INFO_DP", "INFO_DEPTH", "ANN_DP", "ANN_TotalDepth"])
+            .and_then(|s| s.parse().ok())
     }
 
     fn extract_tumor_depth(info_fields: &HashMap<String, String>) -> Option<u32> {
-        // Try different field names for tumor/alternative allele depth
-        Self::get_annotation_field(
-            info_fields,
-            &[
-                "INFO_AO",
-                "AO",
-                "AD_ALT",
-                "t_alt_count",
-                "TumorDepth",
-                "ALT_DEPTH",
-                // SnpEff specific fields
-                "ANN_AO",
-                "ANN_AD",
-                // Sample-based fields
-                "SAMPLE_AO",
-                "FORMAT_AO",
-                "FORMAT_AD",
-                // Alternative depth representations
-                "ALT_COUNT",
-                "TUMOR_ALT_COUNT",
-            ],
-        )
-        .and_then(|s| {
+        Self::get_annotation_field(info_fields, &["INFO_AO", "ANN_AO", "ANN_AD"]).and_then(|s| {
             // Handle comma-separated values by taking the first one
             let first_value = s.split(',').next().unwrap_or(&s);
             first_value.parse().ok()
@@ -447,14 +298,7 @@ impl MafRecord {
 
     /// Extract sequencing platform or variant calling tool info
     fn extract_sequencing_info(info_fields: &HashMap<String, String>) -> Option<String> {
-        // Look for various tool/platform indicators in INFO fields
-        for field_name in &[
-            "INFO_source",
-            "INFO_caller",
-            "INFO_platform",
-            "source",
-            "caller",
-        ] {
+        for field_name in &["INFO_source", "INFO_caller", "INFO_platform"] {
             if let Some(value) = info_fields.get(*field_name) {
                 if !value.is_empty() && value != "." {
                     return Some(value.clone());
@@ -564,140 +408,61 @@ impl MafRecord {
     }
 
     fn get_variant_classification(info_fields: &HashMap<String, String>, variant_type: &str) -> String {
-        if let Some(consequence) = Self::get_annotation_field(
-            info_fields,
-            &[
-                "CSQ_Consequence",
-                "ANN_Annotation",
-                "Consequence",
-                "Annotation",
-                "Effect",
-                "Variant_Effect",
-            ],
-        ) {
-            Self::map_consequence_to_maf(&consequence, info_fields, variant_type)
-        } else {
-            // Fallback: check IMPACT field directly
-            if let Some(impact) = Self::get_annotation_field(
-                info_fields,
-                &["CSQ_IMPACT", "ANN_Annotation_Impact", "IMPACT"],
-            ) {
-                match impact.to_uppercase().as_str() {
-                    "HIGH" => "Missense_Mutation".to_string(),
-                    "MODERATE" => "Missense_Mutation".to_string(),
-                    "LOW" => "Silent".to_string(),
-                    "MODIFIER" => "Silent".to_string(),
-                    _ => "Unknown".to_string(),
-                }
-            } else {
-                "Unknown".to_string()
-            }
+        match Self::get_annotation_field(info_fields, &["CSQ_Consequence", "ANN_Annotation"]) {
+            Some(consequence) => Self::map_consequence_to_maf(&consequence, info_fields, variant_type),
+            None => Self::classify_by_impact(info_fields),
         }
     }
+
+    /// Ordered by severity (HIGH > MODERATE > LOW > MODIFIER). `frameshift` is
+    /// handled separately since its classification depends on `variant_type`.
+    const CLASSIFICATION_RULES: &'static [ClassificationRule] = &[
+        (|c| c.contains("stop_gained") || c.contains("nonsense"), "Nonsense_Mutation"),
+        (|c| c.contains("splice") && (c.contains("acceptor") || c.contains("donor")), "Splice_Site"),
+        (|c| c.contains("start_lost") || c.contains("initiator_codon_variant"), "Translation_Start_Site"),
+        (|c| c.contains("stop_lost"), "Nonstop_Mutation"),
+        (|c| c.contains("missense") || c.contains("rare_amino_acid_variant"), "Missense_Mutation"),
+        (|c| c.contains("inframe_insertion"), "In_Frame_Ins"),
+        (|c| c.contains("inframe_deletion"), "In_Frame_Del"),
+        (|c| c.contains("synonymous") || c.contains("silent") || c.contains("stop_retained_variant"), "Silent"),
+        (|c| c.contains("splice_region"), "Splice_Region"),
+        // Specific UTR types are checked before anything more generic.
+        (|c| c.contains("5_prime_utr"), "5'UTR"),
+        (|c| c.contains("3_prime_utr"), "3'UTR"),
+        (|c| c.contains("upstream_gene_variant"), "5'Flank"),
+        (|c| c.contains("downstream_gene_variant"), "3'Flank"),
+        (|c| c.contains("non_coding_transcript"), "RNA"),
+        (|c| c.contains("regulatory_region") || c.contains("tf_binding_site"), "Targeted_Region"),
+        (|c| c.contains("intronic") || c.contains("intron"), "Intron"),
+        (|c| c.contains("intergenic"), "IGR"),
+    ];
 
     fn map_consequence_to_maf(consequence: &str, info_fields: &HashMap<String, String>, variant_type: &str) -> String {
         let consequence_lower = consequence.to_lowercase();
 
-        // Handle multiple consequences separated by &, |, or ,
-        let consequences: Vec<&str> = consequence_lower
-            .split(&['&', '|', ','][..])
-            .map(|s| s.trim())
-            .collect();
-
-        // Find the most severe consequence (ordered by severity: HIGH > MODERATE > LOW > MODIFIER)
-        for cons in &consequences {
-            // === HIGH IMPACT ===
-            if cons.contains("stop_gained") || cons.contains("nonsense") {
-                return "Nonsense_Mutation".to_string();
-            }
+        // A variant can carry multiple consequences separated by &, |, or ,;
+        // the first one that matches a rule determines severity.
+        for cons in consequence_lower.split(&['&', '|', ','][..]).map(|s| s.trim()) {
             if cons.contains("frameshift") {
-                return if variant_type == "INS" {
-                    "Frame_Shift_Ins".to_string()
-                } else {
-                    "Frame_Shift_Del".to_string()
-                };
+                let classification = if variant_type == "INS" { "Frame_Shift_Ins" } else { "Frame_Shift_Del" };
+                return classification.to_string();
             }
-            if cons.contains("splice")
-                && (cons.contains("acceptor") || cons.contains("donor"))
+            if let Some((_, classification)) =
+                Self::CLASSIFICATION_RULES.iter().find(|(predicate, _)| predicate(cons))
             {
-                return "Splice_Site".to_string();
-            }
-            if cons.contains("start_lost") || cons.contains("initiator_codon_variant") {
-                return "Translation_Start_Site".to_string();
-            }
-            if cons.contains("stop_lost") {
-                return "Nonstop_Mutation".to_string();
-            }
-
-            // === MODERATE IMPACT ===
-            if cons.contains("missense") || cons.contains("rare_amino_acid_variant") {
-                return "Missense_Mutation".to_string();
-            }
-            if cons.contains("inframe_insertion") {
-                return "In_Frame_Ins".to_string();
-            }
-            if cons.contains("inframe_deletion") {
-                return "In_Frame_Del".to_string();
-            }
-
-            // === LOW IMPACT ===
-            if cons.contains("synonymous") || cons.contains("silent")
-                || cons.contains("stop_retained_variant")
-            {
-                return "Silent".to_string();
-            }
-            if cons.contains("splice_region") {
-                return "Splice_Region".to_string();
-            }
-
-            // === UTR / FLANKING ===
-            // Check specific UTR types before generic "utr" to avoid misclassification
-            if cons.contains("5_prime_utr") {
-                return "5'UTR".to_string();
-            }
-            if cons.contains("3_prime_utr") {
-                return "3'UTR".to_string();
-            }
-            if cons.contains("upstream_gene_variant") {
-                return "5'Flank".to_string();
-            }
-            if cons.contains("downstream_gene_variant") {
-                return "3'Flank".to_string();
-            }
-
-            // === NON-CODING / RNA ===
-            if cons.contains("non_coding_transcript") {
-                return "RNA".to_string();
-            }
-
-            // === REGULATORY ===
-            if cons.contains("regulatory_region") || cons.contains("tf_binding_site") {
-                return "Targeted_Region".to_string();
-            }
-
-            // === INTRONIC / INTERGENIC ===
-            if cons.contains("intronic") || cons.contains("intron") {
-                return "Intron".to_string();
-            }
-            if cons.contains("intergenic") {
-                return "IGR".to_string();
+                return classification.to_string();
             }
         }
 
-        // Fallback: check IMPACT field
-        if let Some(impact) = Self::get_annotation_field(
-            info_fields,
-            &["CSQ_IMPACT", "ANN_Annotation_Impact", "IMPACT"],
-        ) {
-            match impact.to_uppercase().as_str() {
-                "HIGH" => "Missense_Mutation".to_string(),
-                "MODERATE" => "Missense_Mutation".to_string(),
-                "LOW" => "Silent".to_string(),
-                "MODIFIER" => "Silent".to_string(),
-                _ => "Unknown".to_string(),
-            }
-        } else {
-            "Unknown".to_string()
+        Self::classify_by_impact(info_fields)
+    }
+
+    fn classify_by_impact(info_fields: &HashMap<String, String>) -> String {
+        let impact = Self::get_annotation_field(info_fields, &["CSQ_IMPACT", "ANN_Annotation_Impact"]);
+        match impact.as_deref().map(|s| s.to_uppercase()).as_deref() {
+            Some("HIGH") | Some("MODERATE") => "Missense_Mutation".to_string(),
+            Some("LOW") | Some("MODIFIER") => "Silent".to_string(),
+            _ => "Unknown".to_string(),
         }
     }
 

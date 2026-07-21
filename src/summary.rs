@@ -58,6 +58,19 @@ impl SummaryStats {
     }
 }
 
+/// Count VCF data lines whose ALT field (5th tab-separated column) lists
+/// more than one comma-separated allele.
+pub fn count_multiallelic_sites(data_lines: &[String]) -> usize {
+    data_lines
+        .iter()
+        .filter(|line| {
+            line.split('\t')
+                .nth(4)
+                .is_some_and(|alt| alt.contains(','))
+        })
+        .count()
+}
+
 /// Count variants per chromosome from raw VCF data lines.
 /// Each line starts with the chromosome name followed by a tab.
 pub fn count_input_chromosomes(data_lines: &[String]) -> IndexMap<String, usize> {
@@ -110,6 +123,33 @@ pub fn format_chrom_table(counts: &IndexMap<String, usize>, total: usize) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_count_multiallelic_sites_none() {
+        let lines = vec![
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
+            "chr1\t200\t.\tC\tT\t40\tPASS\tDP=30".to_string(),
+        ];
+        assert_eq!(count_multiallelic_sites(&lines), 0);
+    }
+
+    #[test]
+    fn test_count_multiallelic_sites_some() {
+        let lines = vec![
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
+            "chr1\t200\t.\tC\tT,A\t40\tPASS\tDP=30".to_string(),
+            "chr2\t300\t.\tG\tA,T,C\t50\tPASS\tDP=20".to_string(),
+        ];
+        assert_eq!(count_multiallelic_sites(&lines), 2);
+    }
+
+    #[test]
+    fn test_count_multiallelic_sites_ignores_commas_outside_alt() {
+        // A comma inside INFO (e.g. an AF list) must not be mistaken for a
+        // multiallelic ALT field.
+        let lines = vec!["chr1\t100\t.\tA\tG\t60\tPASS\tAF=0.1,0.2".to_string()];
+        assert_eq!(count_multiallelic_sites(&lines), 0);
+    }
 
     #[test]
     fn test_count_input_chromosomes() {

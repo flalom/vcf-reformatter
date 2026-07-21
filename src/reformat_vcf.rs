@@ -277,7 +277,13 @@ fn parse_annotation_fields(
     if let Some(csq_value) = extract_csq_regex(&mut parsed_lines) {
         if let Some(field_names) = csq_field_names {
             if !field_names.is_empty() && !csq_value.trim().is_empty() {
-                match parse_csq_field_with_handling(&csq_value, field_names, transcript_handling) {
+                match parse_annotation_field_with_handling(
+                    "CSQ",
+                    &csq_value,
+                    field_names,
+                    transcript_handling,
+                    find_most_severe_consequence,
+                ) {
                     Ok(records) if !records.is_empty() => {
                         return Ok(AnnotationParseResult {
                             field_type: AnnotationFieldType::Csq,
@@ -299,7 +305,13 @@ fn parse_annotation_fields(
     if let Some(ann_value) = extract_ann_regex(&mut parsed_lines) {
         if let Some(field_names) = ann_field_names {
             if !field_names.is_empty() && !ann_value.trim().is_empty() {
-                match parse_ann_field_with_handling(&ann_value, field_names, transcript_handling) {
+                match parse_annotation_field_with_handling(
+                    "ANN",
+                    &ann_value,
+                    field_names,
+                    transcript_handling,
+                    find_most_severe_ann_consequence,
+                ) {
                     Ok(records) if !records.is_empty() => {
                         return Ok(AnnotationParseResult {
                             field_type: AnnotationFieldType::Ann,
@@ -341,20 +353,25 @@ fn create_dummy_vcf_line(info: &str) -> Vec<String> {
     ]
 }
 
-// FIXED: Remove the duplicate function and keep only this safer version
-fn parse_csq_field_with_handling(
-    csq_value: &str,
-    csq_field_names: &[String],
+/// Split a CSQ/ANN value into individual `|`-delimited transcript annotations
+/// and reduce them to output records according to `transcript_handling`.
+/// `find_most_severe` implements the annotation-type-specific severity ranking
+/// (VEP orders by a fixed consequence-term list; SnpEff ranks by IMPACT).
+fn parse_annotation_field_with_handling(
+    prefix: &str,
+    value: &str,
+    field_names: &[String],
     transcript_handling: TranscriptHandling,
+    find_most_severe: impl Fn(
+        &[&str],
+        &[String],
+    ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>>,
 ) -> Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
-    if csq_value.trim().is_empty() {
+    if value.trim().is_empty() {
         return Ok(Vec::new());
     }
 
-    let annotations: Vec<&str> = csq_value
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .collect();
+    let annotations: Vec<&str> = value.split(',').filter(|s| !s.trim().is_empty()).collect();
 
     if annotations.is_empty() {
         return Ok(Vec::new());
@@ -365,20 +382,20 @@ fn parse_csq_field_with_handling(
             let first_annotation = annotations
                 .first()
                 .ok_or("No annotations found after filtering")?;
-            let parsed = parse_single_csq_annotation(first_annotation, csq_field_names)?;
+            let parsed = parse_single_annotation(prefix, first_annotation, field_names)?;
             Ok(vec![parsed])
         }
         TranscriptHandling::MostSevere => {
-            let most_severe = find_most_severe_consequence(&annotations, csq_field_names)?;
+            let most_severe = find_most_severe(&annotations, field_names)?;
             Ok(vec![most_severe])
         }
         TranscriptHandling::SplitRows => {
             let mut all_annotations = Vec::new();
             for annotation in annotations {
-                match parse_single_csq_annotation(annotation, csq_field_names) {
+                match parse_single_annotation(prefix, annotation, field_names) {
                     Ok(parsed) => all_annotations.push(parsed),
                     Err(e) => {
-                        eprintln!("Warning: Failed to parse CSQ annotation '{annotation}': {e}");
+                        eprintln!("Warning: Failed to parse {prefix} annotation '{annotation}': {e}");
                     }
                 }
             }
@@ -387,107 +404,34 @@ fn parse_csq_field_with_handling(
     }
 }
 
-fn parse_ann_field_with_handling(
-    ann_value: &str,
-    ann_field_names: &[String],
-    transcript_handling: TranscriptHandling,
-) -> Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
-    if ann_value.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let annotations: Vec<&str> = ann_value
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-
-    if annotations.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    match transcript_handling {
-        TranscriptHandling::FirstOnly => {
-            let first_annotation = annotations
-                .first()
-                .ok_or("No annotations found after filtering")?;
-            let parsed = parse_single_ann_annotation(first_annotation, ann_field_names)?;
-            Ok(vec![parsed])
-        }
-        TranscriptHandling::MostSevere => {
-            let most_severe = find_most_severe_ann_consequence(&annotations, ann_field_names)?;
-            Ok(vec![most_severe])
-        }
-        TranscriptHandling::SplitRows => {
-            let mut all_annotations = Vec::new();
-            for annotation in annotations {
-                match parse_single_ann_annotation(annotation, ann_field_names) {
-                    Ok(parsed) => all_annotations.push(parsed),
-                    Err(e) => {
-                        eprintln!("Warning: Failed to parse ANN annotation '{annotation}': {e}");
-                    }
-                }
-            }
-            Ok(all_annotations)
-        }
-    }
-}
-
-fn parse_single_csq_annotation(
+/// Parse a single `|`-delimited CSQ/ANN annotation into a `{prefix}_{field}`
+/// map, e.g. `CSQ_Consequence` or `ANN_Gene_Name`. Values beyond the known
+/// field names are kept under `{prefix}_EXTRA_N`.
+fn parse_single_annotation(
+    prefix: &str,
     annotation: &str,
-    csq_field_names: &[String],
+    field_names: &[String],
 ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
     if annotation.trim().is_empty() {
-        return Err("Empty CSQ annotation".into());
+        return Err(format!("Empty {prefix} annotation").into());
     }
 
     let values: Vec<&str> = annotation.split('|').collect();
     let mut annotation_map = HashMap::new();
 
-    for (i, field_name) in csq_field_names.iter().enumerate() {
+    for (i, field_name) in field_names.iter().enumerate() {
         let value = values.get(i).unwrap_or(&"").trim();
         let formatted_value = if value.is_empty() { "." } else { value };
         annotation_map.insert(
-            format!("CSQ_{}", sanitize_field_name(field_name)),
+            format!("{prefix}_{}", sanitize_field_name(field_name)),
             formatted_value.to_string(),
         );
     }
 
-    if values.len() > csq_field_names.len() {
-        for (i, value) in values.iter().enumerate().skip(csq_field_names.len()) {
+    if values.len() > field_names.len() {
+        for (i, value) in values.iter().enumerate().skip(field_names.len()) {
             annotation_map.insert(
-                format!("CSQ_EXTRA_{}", i - csq_field_names.len() + 1),
-                value.trim().to_string(),
-            );
-        }
-    }
-
-    Ok(annotation_map)
-}
-
-fn parse_single_ann_annotation(
-    annotation: &str,
-    ann_field_names: &[String],
-) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-    if annotation.trim().is_empty() {
-        return Err("Empty ANN annotation".into());
-    }
-
-    let values: Vec<&str> = annotation.split('|').collect();
-    let mut annotation_map = HashMap::new();
-
-    for (i, field_name) in ann_field_names.iter().enumerate() {
-        let value = values.get(i).unwrap_or(&"").trim();
-        let formatted_value = if value.is_empty() { "." } else { value };
-        annotation_map.insert(
-            format!("ANN_{}", sanitize_field_name(field_name)),
-            formatted_value.to_string(),
-        );
-    }
-
-    if values.len() > ann_field_names.len() {
-        for (i, value) in values.iter().enumerate().skip(ann_field_names.len()) {
-            annotation_map.insert(
-                format!("ANN_EXTRA_{}", i - ann_field_names.len() + 1),
+                format!("{prefix}_EXTRA_{}", i - field_names.len() + 1),
                 value.trim().to_string(),
             );
         }
@@ -527,7 +471,7 @@ fn find_most_severe_ann_consequence(
     }
 
     let selected_annotation = most_severe.unwrap_or(annotations[0]);
-    parse_single_ann_annotation(selected_annotation, ann_field_names)
+    parse_single_annotation("ANN", selected_annotation, ann_field_names)
 }
 
 /// Convert SnpEff impact level to numeric severity score
@@ -709,7 +653,7 @@ fn find_most_severe_consequence(
         }
     }
 
-    parse_single_csq_annotation(most_severe_annotation, csq_field_names)
+    parse_single_annotation("CSQ", most_severe_annotation, csq_field_names)
 }
 /// Reformat VCF data with header information for annotation field extraction
 ///
@@ -1006,29 +950,6 @@ fn write_tsv_content<W: Write>(
 
     Ok(())
 }
-/// Simplified VCF reformatting function with default settings
-///
-/// This convenience function reformats VCF data using default settings:
-/// - No header parsing (empty header)
-/// - First transcript only
-///
-/// Use `reformat_vcf_data_with_header` for more control over the processing.
-///
-/// # Arguments
-///
-/// * `column_names` - Column header line from VCF
-/// * `data_lines` - VCF data lines to process
-///
-/// # Returns
-///
-/// A tuple of (headers, reformatted_records)
-pub fn _reformat_vcf_data(
-    column_names: &str,
-    data_lines: &[String],
-) -> std::result::Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
-    reformat_vcf_data_with_header("", column_names, data_lines, TranscriptHandling::FirstOnly)
-}
-
 pub fn write_maf_file(
     filename: &str,
     records: &[MafRecord],

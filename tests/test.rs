@@ -4,10 +4,9 @@ use std::io::Write;
 use tempfile::tempdir;
 
 use vcf_reformatter::{
-    essentials_fields::VcfVariant,
     extract_csq_and_csq_names::extract_csq_regex,
     extract_sample_info::{parse_format_and_samples, ParsedFormatSample, _SampleData},
-    get_info_from_header::{_extract_all_info_descriptions, extract_csq_format_from_header},
+    get_info_from_header::extract_csq_format_from_header,
     read_vcf_gz::read_vcf_gz,
     reformat_vcf::{
         get_ann_impact_severity, parse_info_field, reformat_vcf_data_with_header,
@@ -90,80 +89,6 @@ fn test_vcf_with_empty_lines() {
 
     let (_, _, data) = result.unwrap();
     assert_eq!(data.len(), 2); // Empty lines should be skipped
-}
-// ------------------------------------------------------------------------------
-// Tests for essentials_fields.rs
-// ------------------------------------------------------------------------------
-#[test]
-fn test_vcf_variant_parsing() {
-    let line = "chr1\t100\t.\tA\tG\t60\tPASS\tDP=10";
-    let column_names = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"];
-
-    let result = VcfVariant::from_line(line, &column_names);
-    assert!(result.is_ok());
-
-    let variant = result.unwrap();
-    assert_eq!(variant.chromosome, "chr1");
-    assert_eq!(variant.position, 100);
-    assert_eq!(variant.id, None);
-    assert_eq!(variant.reference, "A");
-    assert_eq!(variant.alternate, "G");
-    assert_eq!(variant.quality, Some(60.0));
-    assert_eq!(variant.filter, "PASS");
-    assert_eq!(variant.info, "DP=10");
-    assert_eq!(variant.format, None);
-    assert_eq!(variant.samples.len(), 0);
-}
-#[test]
-fn test_vcf_variant_with_id_and_samples() {
-    let line = "chr2\t200\trs123\tC\tT\t80\tPASS\tDP=20\tGT:DP\t0/1:20\t1/1:22";
-    let column_names = [
-        "CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", "SAMPLE1",
-        "SAMPLE2",
-    ];
-    let result = VcfVariant::from_line(line, &column_names);
-    assert!(result.is_ok());
-
-    let variant = result.unwrap();
-    assert_eq!(variant.chromosome, "chr2");
-    assert_eq!(variant.position, 200);
-    assert_eq!(variant.id, Some("rs123".to_string()));
-    assert_eq!(variant.reference, "C");
-    assert_eq!(variant.alternate, "T");
-    assert_eq!(variant.quality, Some(80.0));
-    assert_eq!(variant.filter, "PASS");
-    assert_eq!(variant.info, "DP=20");
-    assert_eq!(variant.format, Some("GT:DP".to_string()));
-    assert_eq!(variant.samples.len(), 2);
-    assert_eq!(variant.samples[0], "0/1:20");
-    assert_eq!(variant.samples[1], "1/1:22");
-}
-#[test]
-fn test_vcf_variant_missing_quality() {
-    let line = "chr3\t300\t.\tG\tA\t.\tPASS\tDP=30";
-    let column_names = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"];
-
-    let result = VcfVariant::from_line(line, &column_names);
-    assert!(result.is_ok());
-
-    let variant = result.unwrap();
-    assert_eq!(variant.quality, None);
-}
-#[test]
-fn test_vcf_variant_invalid_position() {
-    let line = "chr3\tinvalid\t.\tG\tA\t90\tPASS\tDP=30";
-    let column_names = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"];
-
-    let result = VcfVariant::from_line(line, &column_names);
-    assert!(result.is_err());
-}
-#[test]
-fn test_vcf_variant_too_few_fields() {
-    let line = "chr3\t300\t.\tG\tA\t90\tPASS";
-    let column_names = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO"];
-
-    let result = VcfVariant::from_line(line, &column_names);
-    assert!(result.is_err());
 }
 // ------------------------------------------------------------------------------
 // Tests for extract_csq_and_csq_names.rs
@@ -275,28 +200,6 @@ fn test_extract_csq_format_from_header_no_format() {
     let result = extract_csq_format_from_header(header);
     assert!(result.is_none());
 }
-#[test]
-fn test_extract_all_info_descriptions() {
-    let header = r#"##fileformat=VCFv4.2
-##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">
-##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency">
-##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">"#;
-
-    let result = _extract_all_info_descriptions(header);
-
-    assert_eq!(result.len(), 3);
-    assert_eq!(result.get("DP").unwrap(), "Total Depth");
-    assert_eq!(result.get("AF").unwrap(), "Allele Frequency");
-    assert_eq!(result.get("DB").unwrap(), "dbSNP membership");
-}
-#[test]
-fn test_extract_all_info_descriptions_no_info() {
-    let header = r#"##fileformat=VCFv4.2
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">"#;
-
-    let result = _extract_all_info_descriptions(header);
-    assert!(result.is_empty());
-}
 // ------------------------------------------------------------------------------
 // Tests for extract_sample_info.rs
 // ------------------------------------------------------------------------------
@@ -387,32 +290,6 @@ fn test_get_headers_for_samples() {
     );
 }
 
-#[test]
-fn test_get_values_for_samples() {
-    let mut parsed = ParsedFormatSample::new();
-    parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
-
-    let mut sample1 = _SampleData::_new("SAMPLE1".to_string());
-    sample1
-        .format_fields
-        .insert("GT".to_string(), "0/1".to_string());
-    sample1
-        .format_fields
-        .insert("DP".to_string(), "20".to_string());
-
-    let mut sample2 = _SampleData::_new("SAMPLE2".to_string());
-    sample2
-        .format_fields
-        .insert("GT".to_string(), "1/1".to_string());
-    sample2
-        .format_fields
-        .insert("DP".to_string(), "30".to_string());
-
-    parsed.samples = vec![sample1, sample2];
-
-    let values = parsed._get_values_for_samples();
-    assert_eq!(values, vec!["0/1", "20", "1/1", "30"]);
-}
 // ------------------------------------------------------------------------------
 // Tests for reformat_vcf.rs
 // ------------------------------------------------------------------------------
@@ -736,28 +613,6 @@ fn test_complex_sample_names_header_generation() {
     ];
 
     assert_eq!(headers, expected_headers);
-}
-
-#[test]
-fn test_complex_sample_names_value_extraction() {
-    use vcf_reformatter::extract_sample_info::parse_format_and_samples;
-
-    let format = Some("GT:AD:AF:DP");
-    let sample_fields = vec![
-        "0/0:257,4:0.017:261".to_string(),
-        "0/1:303,6:0.020:309".to_string(),
-    ];
-    let sample_names = vec!["B487_B487_1_cOM".to_string(), "B487_B487_2_LN".to_string()];
-    let parsed = parse_format_and_samples(format, &sample_fields, &sample_names).unwrap();
-    let values = parsed._get_values_for_samples();
-
-    // Expected values in the same order as headers
-    let expected_values = vec![
-        "0/0", "257,4", "0.017", "261", // B487_B487_1_cOM
-        "0/1", "303,6", "0.020", "309", // B487_B487_2_LN
-    ];
-
-    assert_eq!(values, expected_values);
 }
 
 #[test]
@@ -2636,6 +2491,133 @@ chr1	69511	.	C	T	200	PASS	DP=60;AF=0.8;CSQ=T|synonymous_variant|LOW|OR4F5|ENSG00
         "Command failed with stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn test_stdin_input_plain() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let vcf_content = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t100\t.\tA\tG\t60\tPASS\tDP=50\n";
+
+    let dir = tempdir().unwrap();
+    let mut child = Command::new("cargo")
+        .args(["run", "--", "-", "-o", dir.path().to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn vcf-reformatter");
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(vcf_content.as_bytes())
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reformatted = std::fs::read_to_string(dir.path().join("stdin_reformatted.tsv")).unwrap();
+    assert!(reformatted.contains("chr1"));
+    assert!(reformatted.contains("50")); // DP value survived the round trip
+}
+
+#[test]
+fn test_stdin_input_gzip() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let vcf_content = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr2\t200\t.\tC\tT\t80\tPASS\tDP=30\n";
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(vcf_content.as_bytes()).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let dir = tempdir().unwrap();
+    let mut child = Command::new("cargo")
+        .args(["run", "--", "-", "-o", dir.path().to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn vcf-reformatter");
+
+    child.stdin.take().unwrap().write_all(&compressed).unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reformatted = std::fs::read_to_string(dir.path().join("stdin_reformatted.tsv")).unwrap();
+    assert!(reformatted.contains("chr2"));
+    assert!(reformatted.contains("30"));
+}
+
+#[test]
+fn test_multiallelic_warning_on_stderr() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t100\t.\tA\tG,T\t60\tPASS\tDP=50\nchr1\t200\t.\tC\tT\t60\tPASS\tDP=30\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            temp_vcf.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute vcf-reformatter");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("1 multiallelic site"),
+        "stderr was: {stderr}"
+    );
+    assert!(stderr.contains("bcftools norm"), "stderr was: {stderr}");
+}
+
+#[test]
+fn test_no_multiallelic_warning_when_none_present() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t100\t.\tA\tG\t60\tPASS\tDP=50\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            temp_vcf.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute vcf-reformatter");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("multiallelic"), "stderr was: {stderr}");
 }
 
 // ------------------------------------------------------------------------------
