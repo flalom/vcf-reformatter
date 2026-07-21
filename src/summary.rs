@@ -1,3 +1,4 @@
+use crate::reformat_vcf::ReformattedVcfRecord;
 use indexmap::IndexMap;
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
@@ -85,9 +86,16 @@ pub fn count_input_chromosomes(data_lines: &[String]) -> IndexMap<String, usize>
 
 /// Sort chromosome keys in natural order: 1-22, X, Y, M/MT, then others alphabetically.
 pub fn sort_chromosomes(counts: IndexMap<String, usize>) -> IndexMap<String, usize> {
-    let mut entries: Vec<(String, usize)> = counts.into_iter().collect();
+    sort_by_chromosome(counts.into_iter().collect())
+        .into_iter()
+        .collect()
+}
+
+/// Sort any chromosome-keyed entries in natural order (see `chrom_sort_key`).
+/// Shared by `sort_chromosomes` and `compute_damage_breakdowns`.
+fn sort_by_chromosome<V>(mut entries: Vec<(String, V)>) -> Vec<(String, V)> {
     entries.sort_by(|(a, _), (b, _)| chrom_sort_key(a).cmp(&chrom_sort_key(b)));
-    entries.into_iter().collect()
+    entries
 }
 
 /// Generate a sort key for a chromosome name.
@@ -118,6 +126,147 @@ pub fn format_chrom_table(counts: &IndexMap<String, usize>, total: usize) -> Str
         writeln!(output, "  {:<10} {:>8}  ({:.1}%)", chrom, count, pct).unwrap();
     }
     output
+}
+
+/// Per-chromosome breakdown of a single annotation-severity metric (SIFT,
+/// PolyPhen, or SnpEff's Impact), used to drive the HTML report's
+/// stacked-bar chart.
+pub struct DamageBreakdown {
+    pub metric_name: String,
+    /// Ordered severity-first (most severe category first).
+    pub categories: Vec<String>,
+    pub per_chrom_counts: IndexMap<String, IndexMap<String, usize>>,
+}
+
+const SIFT_CATEGORIES: [&str; 4] = [
+    "deleterious",
+    "deleterious_low_confidence",
+    "tolerated_low_confidence",
+    "tolerated",
+];
+const POLYPHEN_CATEGORIES: [&str; 4] = [
+    "probably_damaging",
+    "possibly_damaging",
+    "benign",
+    "unknown",
+];
+const IMPACT_CATEGORIES: [&str; 4] = ["HIGH", "MODERATE", "LOW", "MODIFIER"];
+
+/// Parse VEP's `"category(score)"` format (e.g. `"deleterious(0.02)"`) into
+/// just the category. Returns `None` for missing/empty/`"."` values.
+fn parse_bracketed_category(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "." {
+        return None;
+    }
+    let category = raw.split('(').next().unwrap_or(raw).trim();
+    if category.is_empty() {
+        None
+    } else {
+        Some(category.to_string())
+    }
+}
+
+fn parse_impact_category(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "." {
+        None
+    } else {
+        Some(raw.to_uppercase())
+    }
+}
+
+fn build_metric_breakdown(
+    records: &[ReformattedVcfRecord],
+    info_key: &str,
+    metric_name: &str,
+    known_categories: &[&str],
+    parse: fn(&str) -> Option<String>,
+) -> Option<DamageBreakdown> {
+    let mut per_chrom_counts: IndexMap<String, IndexMap<String, usize>> = IndexMap::new();
+    let mut seen_categories: Vec<String> = Vec::new();
+
+    for record in records {
+        let Some(raw) = record.info_fields.get(info_key) else {
+            continue;
+        };
+        let Some(category) = parse(raw) else {
+            continue;
+        };
+        if !seen_categories.contains(&category) {
+            seen_categories.push(category.clone());
+        }
+        *per_chrom_counts
+            .entry(record.chromosome.clone())
+            .or_default()
+            .entry(category)
+            .or_insert(0) += 1;
+    }
+
+    if seen_categories.is_empty() {
+        return None;
+    }
+
+    let mut categories: Vec<String> = known_categories
+        .iter()
+        .map(|s| s.to_string())
+        .filter(|c| seen_categories.contains(c))
+        .collect();
+    let mut extra: Vec<String> = seen_categories
+        .into_iter()
+        .filter(|c| !categories.contains(c))
+        .collect();
+    extra.sort();
+    categories.extend(extra);
+
+    let per_chrom_counts = sort_by_chromosome(per_chrom_counts.into_iter().collect())
+        .into_iter()
+        .collect();
+
+    Some(DamageBreakdown {
+        metric_name: metric_name.to_string(),
+        categories,
+        per_chrom_counts,
+    })
+}
+
+/// Compute per-chromosome annotation-severity breakdowns from whichever
+/// metrics are actually present in the data. VEP input yields SIFT and/or
+/// PolyPhen entries; SnpEff input yields an Impact entry. Neither present
+/// yields an empty `Vec`, in which case the HTML report omits the chart
+/// section entirely.
+pub fn compute_damage_breakdowns(records: &[ReformattedVcfRecord]) -> Vec<DamageBreakdown> {
+    let mut result = Vec::new();
+
+    if let Some(b) = build_metric_breakdown(
+        records,
+        "CSQ_SIFT",
+        "SIFT",
+        &SIFT_CATEGORIES,
+        parse_bracketed_category,
+    ) {
+        result.push(b);
+    }
+    if let Some(b) = build_metric_breakdown(
+        records,
+        "CSQ_PolyPhen",
+        "PolyPhen",
+        &POLYPHEN_CATEGORIES,
+        parse_bracketed_category,
+    ) {
+        result.push(b);
+    }
+    if let Some(b) = build_metric_breakdown(
+        records,
+        "ANN_Annotation_Impact",
+        "Impact",
+        &IMPACT_CATEGORIES,
+        parse_impact_category,
+    ) {
+        result.push(b);
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -217,5 +366,106 @@ mod tests {
         assert!(table.contains("75.0%"));
         assert!(table.contains("chr2"));
         assert!(table.contains("25.0%"));
+    }
+
+    fn make_record(chrom: &str, info: &[(&str, &str)]) -> ReformattedVcfRecord {
+        use crate::reformat_vcf::AnnotationFieldType;
+        use std::collections::HashMap;
+
+        let mut info_fields = HashMap::new();
+        for (k, v) in info {
+            info_fields.insert(k.to_string(), v.to_string());
+        }
+        ReformattedVcfRecord {
+            chromosome: chrom.to_string(),
+            position: 100,
+            id: None,
+            reference: "A".to_string(),
+            alternate: "G".to_string(),
+            quality: None,
+            filter: "PASS".to_string(),
+            info_fields,
+            format_sample_data: None,
+            annotation_field_type: AnnotationFieldType::None,
+        }
+    }
+
+    #[test]
+    fn test_parse_bracketed_category() {
+        assert_eq!(
+            parse_bracketed_category("deleterious(0.02)"),
+            Some("deleterious".to_string())
+        );
+        assert_eq!(
+            parse_bracketed_category("probably_damaging(0.967)"),
+            Some("probably_damaging".to_string())
+        );
+        assert_eq!(parse_bracketed_category("."), None);
+        assert_eq!(parse_bracketed_category(""), None);
+    }
+
+    #[test]
+    fn test_compute_damage_breakdowns_sift_and_polyphen() {
+        let records = vec![
+            make_record(
+                "chr1",
+                &[
+                    ("CSQ_SIFT", "deleterious(0.01)"),
+                    ("CSQ_PolyPhen", "probably_damaging(0.99)"),
+                ],
+            ),
+            make_record(
+                "chr1",
+                &[
+                    ("CSQ_SIFT", "tolerated(0.8)"),
+                    ("CSQ_PolyPhen", "benign(0.05)"),
+                ],
+            ),
+            // No PolyPhen value on this one — must not count toward PolyPhen totals.
+            make_record("chr2", &[("CSQ_SIFT", "deleterious(0.02)")]),
+        ];
+
+        let breakdowns = compute_damage_breakdowns(&records);
+        assert_eq!(breakdowns.len(), 2);
+
+        let sift = breakdowns.iter().find(|b| b.metric_name == "SIFT").unwrap();
+        assert_eq!(sift.categories, vec!["deleterious", "tolerated"]);
+        assert_eq!(sift.per_chrom_counts["chr1"]["deleterious"], 1);
+        assert_eq!(sift.per_chrom_counts["chr1"]["tolerated"], 1);
+        assert_eq!(sift.per_chrom_counts["chr2"]["deleterious"], 1);
+
+        let polyphen = breakdowns
+            .iter()
+            .find(|b| b.metric_name == "PolyPhen")
+            .unwrap();
+        assert_eq!(polyphen.categories, vec!["probably_damaging", "benign"]);
+        assert!(!polyphen.per_chrom_counts.contains_key("chr2"));
+    }
+
+    #[test]
+    fn test_compute_damage_breakdowns_impact_only_for_snpeff() {
+        let records = vec![
+            make_record("chr1", &[("ANN_Annotation_Impact", "HIGH")]),
+            make_record("chr1", &[("ANN_Annotation_Impact", "LOW")]),
+            make_record("chr2", &[("ANN_Annotation_Impact", "MODERATE")]),
+        ];
+
+        let breakdowns = compute_damage_breakdowns(&records);
+        assert_eq!(breakdowns.len(), 1);
+        let impact = &breakdowns[0];
+        assert_eq!(impact.metric_name, "Impact");
+        assert_eq!(impact.categories, vec!["HIGH", "MODERATE", "LOW"]);
+        assert_eq!(impact.per_chrom_counts["chr1"]["HIGH"], 1);
+        assert_eq!(impact.per_chrom_counts["chr1"]["LOW"], 1);
+        assert_eq!(impact.per_chrom_counts["chr2"]["MODERATE"], 1);
+    }
+
+    #[test]
+    fn test_compute_damage_breakdowns_empty_when_no_metrics_present() {
+        let records = vec![make_record(
+            "chr1",
+            &[("CSQ_Consequence", "missense_variant")],
+        )];
+        assert!(compute_damage_breakdowns(&records).is_empty());
     }
 }
