@@ -38,6 +38,7 @@ mod extract_ann_and_ann_names;
 mod extract_csq_and_csq_names;
 mod extract_sample_info;
 mod get_info_from_header;
+mod html_report;
 mod read_vcf_gz;
 mod reformat_vcf;
 mod summary;
