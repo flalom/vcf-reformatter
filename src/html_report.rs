@@ -78,6 +78,14 @@ td.chrom { font-family: var(--mono); }
 "#;
 
 const DAMAGE_CHART_JS: &str = r#"
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
     function renderDamageChart(metric) {
       const data = DAMAGE_DATA[metric];
       const container = document.getElementById('damage-chart');
@@ -89,11 +97,11 @@ const DAMAGE_CHART_JS: &str = r#"
         const total = row.counts.reduce((a, b) => a + b, 0) || 1;
         let x = 90;
         const y = i * (barHeight + gap);
-        svg += '<text x="0" y="' + (y + barHeight / 2 + 4) + '" font-size="12" font-family="ui-monospace, monospace">' + row.chrom + '</text>';
+        svg += '<text x="0" y="' + (y + barHeight / 2 + 4) + '" font-size="12" font-family="ui-monospace, monospace">' + escapeHtml(row.chrom) + '</text>';
         row.counts.forEach((count, ci) => {
           const segWidth = (count / total) * (width - 90);
           if (segWidth > 0) {
-            svg += '<rect x="' + x + '" y="' + y + '" width="' + segWidth + '" height="' + barHeight + '" fill="' + data.colors[ci] + '"><title>' + data.categories[ci] + ': ' + count + '</title></rect>';
+            svg += '<rect x="' + x + '" y="' + y + '" width="' + segWidth + '" height="' + barHeight + '" fill="' + data.colors[ci] + '"><title>' + escapeHtml(data.categories[ci]) + ': ' + count + '</title></rect>';
             x += segWidth;
           }
         });
@@ -441,5 +449,49 @@ mod tests {
             "expected exactly one (the report's own) </script> tag, found {script_close_count}"
         );
         assert!(html.contains("\\u003C"));
+    }
+
+    #[test]
+    fn test_damage_chart_js_escapes_chrom_and_category_before_svg_concat() {
+        let stats = sample_stats();
+        let mut chr1 = IndexMap::new();
+        chr1.insert("SNP".to_string(), 3usize);
+        let mut per_chrom = IndexMap::new();
+        per_chrom.insert(
+            "</svg><img src=x onerror=alert(1)>".to_string(),
+            chr1,
+        );
+
+        let breakdown = DamageBreakdown {
+            metric_name: "Impact".to_string(),
+            categories: vec!["</svg><img src=x onerror=alert(2)>".to_string()],
+            per_chrom_counts: per_chrom,
+        };
+
+        let html = render(&stats, &[breakdown], "2026-07-21 14:30:00");
+
+        // The client-side escaping helper must be present and must be the
+        // thing wrapping row.chrom / data.categories[ci] before they're
+        // concatenated into the SVG markup string.
+        assert!(
+            html.contains("function escapeHtml(s)"),
+            "expected the JS escapeHtml helper to be embedded in the report"
+        );
+        assert!(
+            html.contains("escapeHtml(row.chrom)"),
+            "row.chrom must be passed through escapeHtml before SVG concatenation"
+        );
+        assert!(
+            html.contains("escapeHtml(data.categories[ci])"),
+            "data.categories[ci] must be passed through escapeHtml before SVG concatenation"
+        );
+        assert!(
+            !html.contains("+ row.chrom +"),
+            "row.chrom must not be concatenated unescaped"
+        );
+        assert!(
+            !html.contains("+ data.categories[ci] +"),
+            "data.categories[ci] must not be concatenated unescaped"
+        );
     }
 }
