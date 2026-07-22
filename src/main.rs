@@ -160,9 +160,9 @@ struct Cli {
     #[arg(long)]
     sample_barcode: Option<String>,
 
-    /// Write a summary statistics file alongside output
-    #[arg(long)]
-    summary: bool,
+    /// Report format: html (default), txt, or none (no report generated)
+    #[arg(long, value_enum, default_value_t = ReportFormatCli::Html)]
+    report: ReportFormatCli,
 
     /// Output in Apache Parquet format instead of text
     #[arg(long)]
@@ -203,6 +203,19 @@ enum OutputFormatCli {
     /// Mutation Annotation Format
     #[value(name = "maf")]
     Maf,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum ReportFormatCli {
+    /// Self-contained HTML report with stat cards and damage-metric charts (default)
+    #[value(name = "html")]
+    Html,
+    /// Plain-text report (legacy format)
+    #[value(name = "txt")]
+    Txt,
+    /// No report file
+    #[value(name = "none")]
+    None,
 }
 
 impl From<AnnotationTypeCli> for AnnotationType {
@@ -599,6 +612,7 @@ fn main() {
                             output_chrom_counts,
                             process_time.as_secs_f64(),
                             variants_per_sec,
+                            Some(&records),
                         );
                     }
 
@@ -680,8 +694,8 @@ fn main() {
             };
 
             // Convert to MAF records using the fixed function
-            let maf_records = match convert_to_maf_records(&params) {
-                Ok(records) => records,
+            let (maf_records, reformatted_records) = match convert_to_maf_records(&params) {
+                Ok(result) => result,
                 Err(e) => {
                     eprintln!("❌ Error converting to MAF: {e}");
                     std::process::exit(1);
@@ -748,6 +762,7 @@ fn main() {
                     output_chrom_counts,
                     process_time.as_secs_f64(),
                     variants_per_sec,
+                    Some(&reformatted_records),
                 );
             }
             let total_time = total_start.elapsed();
@@ -912,8 +927,8 @@ fn generate_output_filenames(cli: &Cli) -> (String, String) {
     )
 }
 
-fn generate_summary_filename(cli: &Cli) -> String {
-    output_path(cli, "_summary", "txt")
+fn generate_summary_filename(cli: &Cli, extension: &str) -> String {
+    output_path(cli, "_summary", extension)
 }
 
 fn write_summary_if_requested(
@@ -923,8 +938,9 @@ fn write_summary_if_requested(
     output_chrom_counts: indexmap::IndexMap<String, usize>,
     process_time_secs: f64,
     variants_per_sec: f64,
+    damage_records: Option<&[reformat_vcf::ReformattedVcfRecord]>,
 ) {
-    if !cli.summary {
+    if cli.report == ReportFormatCli::None {
         return;
     }
     let input_chrom_counts = summary::count_input_chromosomes(data_lines);
@@ -951,11 +967,30 @@ fn write_summary_if_requested(
         processing_time_secs: process_time_secs,
         variants_per_sec,
     };
-    let summary_file = generate_summary_filename(cli);
-    if let Err(e) = summary_stats.write_to_file(&summary_file) {
-        eprintln!("Warning: Could not write summary file: {}", e);
-    } else {
-        println!("Summary written to: {}", summary_file);
+
+    match cli.report {
+        ReportFormatCli::None => {}
+        ReportFormatCli::Txt => {
+            let summary_file = generate_summary_filename(cli, "txt");
+            if let Err(e) = summary_stats.write_to_file(&summary_file) {
+                eprintln!("Warning: Could not write summary file: {}", e);
+            } else {
+                println!("Summary written to: {}", summary_file);
+            }
+        }
+        ReportFormatCli::Html => {
+            let breakdowns = damage_records
+                .map(summary::compute_damage_breakdowns)
+                .unwrap_or_default();
+            let summary_file = generate_summary_filename(cli, "html");
+            if let Err(e) =
+                html_report::write_html_report(&summary_stats, &breakdowns, &summary_file)
+            {
+                eprintln!("Warning: Could not write summary report: {}", e);
+            } else {
+                println!("Summary report written to: {}", summary_file);
+            }
+        }
     }
 }
 
@@ -1023,7 +1058,9 @@ struct MafConversionParams<'a> {
     use_parallel: bool,
 }
 
-fn convert_to_maf_records(params: &MafConversionParams) -> Result<Vec<MafRecord>, String> {
+fn convert_to_maf_records(
+    params: &MafConversionParams,
+) -> Result<(Vec<MafRecord>, Vec<reformat_vcf::ReformattedVcfRecord>), String> {
     // For MAF conversion, we need the actual records, so we can't use the streaming function
     // We'll use the regular functions that return (headers, records) tuples
     let reformatted_records = if params.use_parallel {
@@ -1083,5 +1120,5 @@ fn convert_to_maf_records(params: &MafConversionParams) -> Result<Vec<MafRecord>
         println!("   ✅ Generated {} MAF records", maf_records.len());
     }
 
-    Ok(maf_records)
+    Ok((maf_records, reformatted_records.1))
 }

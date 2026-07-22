@@ -2620,6 +2620,169 @@ fn test_no_multiallelic_warning_when_none_present() {
     assert!(!stderr.contains("multiallelic"), "stderr was: {stderr}");
 }
 
+#[test]
+fn test_report_html_is_default_and_contains_expected_sections() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n\
+##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|SIFT|PolyPhen\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t100\t.\tA\tG\t60\tPASS\tCSQ=G|missense_variant|MODERATE|BRCA1|deleterious(0.01)|probably_damaging(0.99)\n\
+chr2\t200\t.\tC\tT\t60\tPASS\tCSQ=T|missense_variant|MODERATE|TP53|tolerated(0.8)|benign(0.02)\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            temp_vcf.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
+            "-p",
+            "report_default",
+        ])
+        .output()
+        .expect("Failed to execute vcf-reformatter");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report_path = dir.path().join("report_default_summary.html");
+    assert!(
+        report_path.exists(),
+        "expected default --report to write an .html file"
+    );
+
+    let html = std::fs::read_to_string(&report_path).unwrap();
+    assert!(html.contains("VCF-REFORMATTER"));
+    assert!(html.contains("chr1"));
+    assert!(html.contains("chr2"));
+    assert!(html.contains("damage-metric-select"));
+    assert!(html.contains("SIFT"));
+    assert!(html.contains("PolyPhen"));
+}
+
+#[test]
+fn test_report_txt_writes_plain_text_file() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t100\t.\tA\tG\t60\tPASS\tDP=50\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            temp_vcf.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
+            "-p",
+            "report_txt",
+            "--report",
+            "txt",
+        ])
+        .output()
+        .expect("Failed to execute vcf-reformatter");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(dir.path().join("report_txt_summary.txt").exists());
+    assert!(!dir.path().join("report_txt_summary.html").exists());
+}
+
+#[test]
+fn test_report_none_writes_no_report_file() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t100\t.\tA\tG\t60\tPASS\tDP=50\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            temp_vcf.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
+            "-p",
+            "report_none",
+            "--report",
+            "none",
+        ])
+        .output()
+        .expect("Failed to execute vcf-reformatter");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(!dir.path().join("report_none_summary.html").exists());
+    assert!(!dir.path().join("report_none_summary.txt").exists());
+}
+
+#[test]
+fn test_report_html_snpeff_shows_impact_metric_not_sift() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n\
+##INFO=<ID=ANN,Number=.,Type=String,Description=\"Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name'\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t100\t.\tA\tG\t60\tPASS\tANN=G|missense_variant|HIGH|BRCA1\n\
+chr2\t200\t.\tC\tT\t60\tPASS\tANN=T|synonymous_variant|LOW|TP53\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            temp_vcf.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
+            "-p",
+            "report_snpeff",
+        ])
+        .output()
+        .expect("Failed to execute vcf-reformatter");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let html = std::fs::read_to_string(dir.path().join("report_snpeff_summary.html")).unwrap();
+    assert!(html.contains("Impact"));
+    assert!(html.contains("\"HIGH\""));
+    assert!(html.contains("\"LOW\""));
+}
+
 // ------------------------------------------------------------------------------
 // Tests for chunking processing
 // ------------------------------------------------------------------------------

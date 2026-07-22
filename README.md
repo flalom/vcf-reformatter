@@ -176,14 +176,20 @@ vcf-reformatter snpeff_annotated.vcf.gz -a snpeff -t most-severe
 ```
 ### Summary and Parquet Output
 ```shell script
-# Generate a processing summary report
-vcf-reformatter input.vcf.gz --summary
+# Generate a processing report (HTML by default)
+vcf-reformatter input.vcf.gz
+
+# Plain-text report instead of HTML
+vcf-reformatter input.vcf.gz --report txt
+
+# No report file
+vcf-reformatter input.vcf.gz --report none
 
 # Output as Apache Parquet (requires parquet_out feature)
 vcf-reformatter input.vcf.gz --parquet
 
-# MAF as parquet with summary
-vcf-reformatter input.vcf.gz --output-format maf --parquet --summary
+# MAF as parquet with an HTML report
+vcf-reformatter input.vcf.gz --output-format maf --parquet
 
 # Build from source with parquet support
 cargo build --release --features parquet_out
@@ -226,7 +232,8 @@ Options:
   -o, --output-dir <DIR>           Output directory [default: current]
   -p, --prefix <PREFIX>            Output file prefix [default: input filename]
   -c, --compress                   Compress output with gzip
-      --summary                    Write a summary statistics file alongside output
+      --report <FORMAT>            Report format [default: html]
+                                    [values: html, txt, none]
       --parquet                    Output in Apache Parquet format instead of text
   -v, --verbose                    Detailed performance statistics
   -h, --help                       Show help
