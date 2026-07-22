@@ -113,7 +113,14 @@ fn escape_html(input: &str) -> String {
 }
 
 fn escape_js_string(input: &str) -> String {
-    input.replace('\\', "\\\\").replace('"', "\\\"")
+    // Escape `<` as < so a value containing "</script" can't break out of
+    // the surrounding <script> block, even though it decodes back to `<` at
+    // JS-string-literal runtime. Standard mitigation for JSON-in-<script>
+    // (same approach Rails/Django use).
+    input
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('<', "\\u003C")
 }
 
 fn render_chrom_rows(stats: &SummaryStats) -> String {
@@ -397,5 +404,42 @@ mod tests {
     #[test]
     fn test_escape_html_escapes_special_characters() {
         assert_eq!(escape_html("<a>&\"'"), "&lt;a&gt;&amp;&quot;&#39;");
+    }
+
+    #[test]
+    fn test_escape_js_string_neutralizes_script_close_tag() {
+        let escaped = escape_js_string("</script><script>alert(1)</script>");
+        assert!(!escaped.contains("</script"));
+        assert!(escaped.contains("\\u003C"));
+    }
+
+    #[test]
+    fn test_render_neutralizes_script_injection_in_damage_data() {
+        let stats = sample_stats();
+        let mut chr1 = IndexMap::new();
+        chr1.insert("</script><script>alert(1)</script>".to_string(), 3usize);
+        let mut per_chrom = IndexMap::new();
+        per_chrom.insert(
+            "</script><script>alert(2)</script>".to_string(),
+            chr1,
+        );
+
+        let breakdown = DamageBreakdown {
+            metric_name: "</script><script>alert(3)</script>".to_string(),
+            categories: vec!["</script><script>alert(1)</script>".to_string()],
+            per_chrom_counts: per_chrom,
+        };
+
+        let html = render(&stats, &[breakdown], "2026-07-21 14:30:00");
+
+        // The report legitimately contains its own <script> / </script> tags;
+        // what must never appear is an *injected* close tag coming from
+        // attacker-controlled data breaking out of the JSON payload.
+        let script_close_count = html.matches("</script>").count();
+        assert_eq!(
+            script_close_count, 1,
+            "expected exactly one (the report's own) </script> tag, found {script_close_count}"
+        );
+        assert!(html.contains("\\u003C"));
     }
 }
