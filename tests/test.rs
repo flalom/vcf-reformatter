@@ -2779,6 +2779,7 @@ chr2\t200\t.\tC\tT\t60\tPASS\tANN=T|synonymous_variant|LOW|TP53\n";
 
     let html = std::fs::read_to_string(dir.path().join("report_snpeff_summary.html")).unwrap();
     assert!(html.contains("Impact"));
+    assert!(!html.contains("SIFT"));
     assert!(html.contains("\"HIGH\""));
     assert!(html.contains("\"LOW\""));
 }
