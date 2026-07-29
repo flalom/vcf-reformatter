@@ -614,6 +614,8 @@ fn main() {
                             variants_per_sec,
                             Some(&records),
                         );
+                    } else if data.2.len() > 100_000 && cli.report != ReportFormatCli::None {
+                        eprintln!("⚠️  Report skipped: dataset was streamed in chunks (memory-efficient mode for large files)");
                     }
 
                     // Writing is streamed inline with processing above, so it has

@@ -220,22 +220,24 @@ fn render_damage_section(breakdowns: &[DamageBreakdown]) -> String {
 
     let mut section = String::new();
     section.push_str("\n  <h2>Annotation severity by chromosome</h2>\n");
-    section.push_str("  <div class=\"damage-controls\">\n");
-    section.push_str("    <label for=\"damage-metric-select\">Metric:</label>\n");
-    section.push_str(
+    if breakdowns.len() > 1 {
+        section.push_str("  <div class=\"damage-controls\">\n");
+        section.push_str("    <label for=\"damage-metric-select\">Metric:</label>\n");
+        section.push_str(
         "    <select id=\"damage-metric-select\" onchange=\"renderDamageChart(this.value)\">\n",
-    );
-    for (i, b) in breakdowns.iter().enumerate() {
-        writeln!(
-            section,
-            "      <option value=\"{name}\"{selected}>{name}</option>",
-            name = escape_html(&b.metric_name),
-            selected = if i == 0 { " selected" } else { "" }
-        )
-        .unwrap();
+        );
+        for (i, b) in breakdowns.iter().enumerate() {
+            writeln!(
+                section,
+                "      <option value=\"{name}\"{selected}>{name}</option>",
+                name = escape_html(&b.metric_name),
+                selected = if i == 0 { " selected" } else { "" }
+            )
+            .unwrap();
+        }
+        section.push_str("    </select>\n");
+        section.push_str("  </div>\n");
     }
-    section.push_str("    </select>\n");
-    section.push_str("  </div>\n");
     section.push_str("  <div id=\"damage-chart\"></div>\n");
     section.push_str("  <script>\n");
     writeln!(
@@ -396,17 +398,54 @@ mod tests {
         let mut per_chrom = IndexMap::new();
         per_chrom.insert("chr1".to_string(), chr1);
 
-        let breakdown = DamageBreakdown {
+        let sift = DamageBreakdown {
             metric_name: "SIFT".to_string(),
             categories: vec!["deleterious".to_string(), "tolerated".to_string()],
             per_chrom_counts: per_chrom,
         };
+        // Two breakdowns: the metric <select> dropdown is only meaningful
+        // (and only rendered) when there's more than one metric to switch
+        // between.
+        let polyphen = DamageBreakdown {
+            metric_name: "PolyPhen".to_string(),
+            categories: vec!["probably_damaging".to_string()],
+            per_chrom_counts: IndexMap::new(),
+        };
 
-        let html = render(&stats, &[breakdown], "2026-07-21 14:30:00");
+        let html = render(&stats, &[sift, polyphen], "2026-07-21 14:30:00");
         assert!(html.contains("damage-metric-select"));
         assert!(html.contains("SIFT"));
+        assert!(html.contains("PolyPhen"));
         assert!(html.contains("\"deleterious\""));
         assert!(html.contains("\"tolerated\""));
+    }
+
+    #[test]
+    fn test_render_omits_metric_select_with_single_breakdown() {
+        // Single-metric input (e.g. SnpEff-only data, which only has an
+        // "Impact" breakdown) must still render the chart, just without a
+        // pointless one-option dropdown to switch metrics that don't exist.
+        let stats = sample_stats();
+        let mut chr1 = IndexMap::new();
+        chr1.insert("HIGH".to_string(), 3usize);
+        chr1.insert("LOW".to_string(), 7usize);
+        let mut per_chrom = IndexMap::new();
+        per_chrom.insert("chr1".to_string(), chr1);
+
+        let breakdown = DamageBreakdown {
+            metric_name: "Impact".to_string(),
+            categories: vec!["HIGH".to_string(), "LOW".to_string()],
+            per_chrom_counts: per_chrom,
+        };
+
+        let html = render(&stats, &[breakdown], "2026-07-21 14:30:00");
+        assert!(!html.contains("damage-metric-select"));
+        assert!(html.contains("Annotation severity by chromosome"));
+        assert!(html.contains("damage-chart"));
+        assert!(html.contains("DAMAGE_DATA"));
+        assert!(html.contains("renderDamageChart(\"Impact\")"));
+        assert!(html.contains("\"HIGH\""));
+        assert!(html.contains("\"LOW\""));
     }
 
     #[test]

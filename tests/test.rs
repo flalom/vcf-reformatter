@@ -2782,6 +2782,11 @@ chr2\t200\t.\tC\tT\t60\tPASS\tANN=T|synonymous_variant|LOW|TP53\n";
     assert!(!html.contains("SIFT"));
     assert!(html.contains("\"HIGH\""));
     assert!(html.contains("\"LOW\""));
+    // SnpEff-only input yields a single ("Impact") breakdown, so the metric
+    // dropdown (only meaningful with 2+ metrics to switch between) must not
+    // be rendered — the chart itself should still appear.
+    assert!(!html.contains("damage-metric-select"));
+    assert!(html.contains("damage-chart"));
 }
 
 // ------------------------------------------------------------------------------
