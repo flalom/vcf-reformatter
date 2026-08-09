@@ -133,196 +133,59 @@ pub fn write_maf_as_parquet(
 }
 
 fn build_maf_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("Hugo_Symbol", DataType::Utf8, false),
-        Field::new("Entrez_Gene_Id", DataType::Utf8, true),
-        Field::new("Center", DataType::Utf8, false),
-        Field::new("NCBI_Build", DataType::Utf8, false),
-        Field::new("Chromosome", DataType::Utf8, false),
-        Field::new("Start_Position", DataType::UInt64, false),
-        Field::new("End_Position", DataType::UInt64, false),
-        Field::new("Strand", DataType::Utf8, false),
-        Field::new("Variant_Classification", DataType::Utf8, false),
-        Field::new("Variant_Type", DataType::Utf8, false),
-        Field::new("Reference_Allele", DataType::Utf8, false),
-        Field::new("Tumor_Seq_Allele1", DataType::Utf8, false),
-        Field::new("Tumor_Seq_Allele2", DataType::Utf8, false),
-        Field::new("dbSNP_RS", DataType::Utf8, true),
-        Field::new("dbSNP_Val_Status", DataType::Utf8, true),
-        Field::new("Tumor_Sample_Barcode", DataType::Utf8, false),
-        Field::new("Matched_Norm_Sample_Barcode", DataType::Utf8, true),
-        Field::new("Mutation_Status", DataType::Utf8, false),
-        Field::new("Validation_Status", DataType::Utf8, true),
-        Field::new("Sequencer", DataType::Utf8, true),
-        Field::new("Sequence_Source", DataType::Utf8, false),
-        Field::new("t_depth", DataType::UInt64, true),
-        Field::new("total_depth", DataType::UInt64, true),
-        Field::new("VAF", DataType::Float64, true),
-        Field::new("HGVSp", DataType::Utf8, true),
-        Field::new("HGVSc", DataType::Utf8, true),
-        Field::new("QUAL", DataType::Float64, true),
-        Field::new("FILTER", DataType::Utf8, false),
-        Field::new("Transcript_ID", DataType::Utf8, true),
-        Field::new("Protein_Position", DataType::Utf8, true),
-    ])
+    let fields: Vec<Field> = MafRecord::get_maf_headers()
+        .iter()
+        .map(|h| match h.as_str() {
+            "Start_Position" | "End_Position" | "t_depth" | "t_ref_count" | "t_alt_count" => {
+                Field::new(h, DataType::UInt64, true)
+            }
+            "QUAL" | "VAF" => Field::new(h, DataType::Float64, true),
+            _ => Field::new(h, DataType::Utf8, true),
+        })
+        .collect();
+    Schema::new(fields)
 }
 
 fn build_maf_batch(
     schema: &Schema,
     records: &[MafRecord],
 ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-    let len = records.len();
-    let dot = ".";
+    let headers = MafRecord::get_maf_headers();
+    let lines: Vec<String> = records.iter().map(|r| r.to_tsv_line()).collect();
+    let rows: Vec<Vec<&str>> = lines.iter().map(|l| l.split('\t').collect()).collect();
 
-    // String columns
-    let hugo: StringArray = records.iter().map(|r| Some(r.hugo_symbol.as_str())).collect();
-    let entrez_strings: Vec<String> = records
+    let columns: Vec<ArrayRef> = headers
         .iter()
-        .map(|r| {
-            r.entrez_gene_id
-                .map_or(".".to_string(), |id| id.to_string())
+        .enumerate()
+        .map(|(col_idx, header)| -> ArrayRef {
+            match header.as_str() {
+                "Start_Position" => Arc::new(
+                    records.iter().map(|r| r.start_position).collect::<arrow::array::UInt64Array>(),
+                ),
+                "End_Position" => Arc::new(
+                    records.iter().map(|r| r.end_position).collect::<arrow::array::UInt64Array>(),
+                ),
+                "t_depth" => Arc::new(
+                    records.iter().map(|r| r.t_depth.map(|v| v as u64)).collect::<arrow::array::UInt64Array>(),
+                ),
+                "t_ref_count" => Arc::new(
+                    records.iter().map(|r| r.t_ref_count.map(|v| v as u64)).collect::<arrow::array::UInt64Array>(),
+                ),
+                "t_alt_count" => Arc::new(
+                    records.iter().map(|r| r.t_alt_count.map(|v| v as u64)).collect::<arrow::array::UInt64Array>(),
+                ),
+                "QUAL" => Arc::new(records.iter().map(|r| r.qual).collect::<arrow::array::Float64Array>()),
+                "VAF" => Arc::new(
+                    records.iter().map(|r| r.vaf.map(|v| v as f64)).collect::<arrow::array::Float64Array>(),
+                ),
+                _ => Arc::new(
+                    rows.iter()
+                        .map(|row| Some(row[col_idx]))
+                        .collect::<StringArray>(),
+                ),
+            }
         })
         .collect();
-    let entrez: StringArray = entrez_strings.iter().map(|s| Some(s.as_str())).collect();
-
-    let center: StringArray = records.iter().map(|r| Some(r.center.as_str())).collect();
-    let ncbi: StringArray = records.iter().map(|r| Some(r.ncbi_build.as_str())).collect();
-    let chrom: StringArray = records.iter().map(|r| Some(r.chromosome.as_str())).collect();
-    let strand: StringArray = records.iter().map(|r| Some(r.strand.as_str())).collect();
-    let var_class: StringArray = records
-        .iter()
-        .map(|r| Some(r.variant_classification.as_str()))
-        .collect();
-    let var_type: StringArray = records
-        .iter()
-        .map(|r| Some(r.variant_type.as_str()))
-        .collect();
-    let ref_allele: StringArray = records
-        .iter()
-        .map(|r| Some(r.reference_allele.as_str()))
-        .collect();
-    let tsa1: StringArray = records
-        .iter()
-        .map(|r| Some(r.tumor_seq_allele1.as_str()))
-        .collect();
-    let tsa2: StringArray = records
-        .iter()
-        .map(|r| Some(r.tumor_seq_allele2.as_str()))
-        .collect();
-    let dbsnp: StringArray = records
-        .iter()
-        .map(|r| r.dbsnp_rs.as_deref().or(Some(dot)))
-        .collect();
-    let dbsnp_val: StringArray = records
-        .iter()
-        .map(|r| r.dbsnp_val_status.as_deref().or(Some(dot)))
-        .collect();
-    let barcode: StringArray = records
-        .iter()
-        .map(|r| Some(r.tumor_sample_barcode.as_str()))
-        .collect();
-    let matched_norm: StringArray = records
-        .iter()
-        .map(|r| r.matched_norm_sample_barcode.as_deref().or(Some(dot)))
-        .collect();
-    let mutation_status: StringArray = records
-        .iter()
-        .map(|r| Some(r.mutation_status.as_str()))
-        .collect();
-    let validation: StringArray = records
-        .iter()
-        .map(|r| r.validation_status.as_deref().or(Some(dot)))
-        .collect();
-    let sequencer: StringArray = records
-        .iter()
-        .map(|r| r.sequencer.as_deref().or(Some(dot)))
-        .collect();
-    let seq_source: StringArray = records
-        .iter()
-        .map(|r| Some(r.sequence_source.as_str()))
-        .collect();
-    let hgvsp: StringArray = records
-        .iter()
-        .map(|r| r.hgvsp.as_deref().or(Some(dot)))
-        .collect();
-    let hgvsc: StringArray = records
-        .iter()
-        .map(|r| r.hgvsc.as_deref().or(Some(dot)))
-        .collect();
-    let filter: StringArray = records
-        .iter()
-        .map(|r| Some(r.filter_status.as_str()))
-        .collect();
-    let transcript_id: StringArray = records
-        .iter()
-        .map(|r| r.transcript_id.as_deref().or(Some(dot)))
-        .collect();
-    let protein_pos: StringArray = records
-        .iter()
-        .map(|r| r.protein_position.as_deref().or(Some(dot)))
-        .collect();
-
-    // Numeric columns
-    let mut start_b = UInt64Builder::with_capacity(len);
-    let mut end_b = UInt64Builder::with_capacity(len);
-    let mut depth_b = UInt64Builder::with_capacity(len);
-    let mut total_depth_b = UInt64Builder::with_capacity(len);
-    let mut vaf_b = Float64Builder::with_capacity(len);
-    let mut qual_b = Float64Builder::with_capacity(len);
-
-    for r in records {
-        start_b.append_value(r.start_position);
-        end_b.append_value(r.end_position);
-        match r.depth {
-            Some(d) => depth_b.append_value(d as u64),
-            None => depth_b.append_null(),
-        }
-        match r.total_depth {
-            Some(d) => total_depth_b.append_value(d as u64),
-            None => total_depth_b.append_null(),
-        }
-        match r.vaf {
-            Some(v) => vaf_b.append_value(v as f64),
-            None => vaf_b.append_null(),
-        }
-        match r.qual {
-            Some(q) => qual_b.append_value(q),
-            None => qual_b.append_null(),
-        }
-    }
-
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(hugo),
-        Arc::new(entrez),
-        Arc::new(center),
-        Arc::new(ncbi),
-        Arc::new(chrom),
-        Arc::new(start_b.finish()),
-        Arc::new(end_b.finish()),
-        Arc::new(strand),
-        Arc::new(var_class),
-        Arc::new(var_type),
-        Arc::new(ref_allele),
-        Arc::new(tsa1),
-        Arc::new(tsa2),
-        Arc::new(dbsnp),
-        Arc::new(dbsnp_val),
-        Arc::new(barcode),
-        Arc::new(matched_norm),
-        Arc::new(mutation_status),
-        Arc::new(validation),
-        Arc::new(sequencer),
-        Arc::new(seq_source),
-        Arc::new(depth_b.finish()),
-        Arc::new(total_depth_b.finish()),
-        Arc::new(vaf_b.finish()),
-        Arc::new(hgvsp),
-        Arc::new(hgvsc),
-        Arc::new(qual_b.finish()),
-        Arc::new(filter),
-        Arc::new(transcript_id),
-        Arc::new(protein_pos),
-    ];
 
     Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
 }

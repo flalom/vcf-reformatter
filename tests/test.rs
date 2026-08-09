@@ -3438,4 +3438,32 @@ mod parquet_tests {
             total_rows, maf_records.len()
         );
     }
+
+    #[test]
+    fn test_parquet_maf_columns_match_get_maf_headers() {
+        use vcf_reformatter::essentials_fields::MafRecord;
+
+        let header = "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL\">";
+        let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
+        let data_lines = vec!["chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;CSQ=G|missense_variant|MODERATE|BRCA1".to_string()];
+
+        let (_, records) = reformat_vcf_data_with_header(
+            header, columns, &data_lines, TranscriptHandling::FirstOnly,
+        ).unwrap();
+        let maf_records: Vec<MafRecord> = records
+            .iter()
+            .map(|r| MafRecord::from_reformatted_record(r, "TestCenter", "GRCh38", "SAMPLE-001").unwrap())
+            .collect();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        vcf_reformatter::parquet_writer::write_maf_as_parquet(path, &maf_records).unwrap();
+
+        let file = std::fs::File::open(path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let schema = reader.metadata().file_metadata().schema_descr();
+        let parquet_columns: Vec<String> = schema.columns().iter().map(|c| c.name().to_string()).collect();
+
+        assert_eq!(parquet_columns, MafRecord::get_maf_headers());
+    }
 }
