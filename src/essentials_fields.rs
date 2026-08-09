@@ -641,6 +641,26 @@ impl MafRecord {
         "Targeted_Region".to_string()
     }
 
+    /// 3-letter → 1-letter amino acid code table, verbatim from vcf2maf's `%aa3to1`
+    /// (mskcc/vcf2maf, vcf2maf.pl) so HGVSp_Short matches the reference tool exactly.
+    const AA_3_TO_1: &'static [(&'static str, &'static str)] = &[
+        ("Ala", "A"), ("Arg", "R"), ("Asn", "N"), ("Asp", "D"), ("Asx", "B"),
+        ("Cys", "C"), ("Glu", "E"), ("Gln", "Q"), ("Glx", "Z"), ("Gly", "G"),
+        ("His", "H"), ("Ile", "I"), ("Leu", "L"), ("Lys", "K"), ("Met", "M"),
+        ("Phe", "F"), ("Pro", "P"), ("Ser", "S"), ("Thr", "T"), ("Trp", "W"),
+        ("Tyr", "Y"), ("Val", "V"), ("Xxx", "X"), ("Ter", "*"),
+    ];
+
+    /// Convert an HGVSp protein-change string to its short form, e.g.
+    /// "p.Val600Glu" -> "p.V600E". Ported from vcf2maf's `%aa3to1` substitution.
+    fn hgvsp_to_short(hgvsp: &str) -> String {
+        let mut short = hgvsp.to_string();
+        for (three, one) in Self::AA_3_TO_1 {
+            short = short.replace(three, one);
+        }
+        short
+    }
+
     fn classify_by_impact(info_fields: &HashMap<String, String>) -> String {
         let impact = Self::get_annotation_field(info_fields, &["CSQ_IMPACT", "ANN_Annotation_Impact"]);
         match impact.as_deref().map(|s| s.to_uppercase()).as_deref() {
@@ -733,5 +753,23 @@ impl MafRecord {
             self.protein_position.as_deref().unwrap_or(dot),
         ]
         .join("\t")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hgvsp_to_short_converts_three_letter_codes() {
+        assert_eq!(MafRecord::hgvsp_to_short("p.Val600Glu"), "p.V600E");
+        assert_eq!(MafRecord::hgvsp_to_short("p.Trp24Ter"), "p.W24*");
+        assert_eq!(MafRecord::hgvsp_to_short("p.Gly12Asp"), "p.G12D");
+    }
+
+    #[test]
+    fn test_hgvsp_to_short_passes_through_non_matching_input() {
+        assert_eq!(MafRecord::hgvsp_to_short(""), "");
+        assert_eq!(MafRecord::hgvsp_to_short("."), ".");
     }
 }
