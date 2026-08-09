@@ -2012,10 +2012,12 @@ fn test_maf_snpeff_specific_consequences() {
 
 #[test]
 fn test_maf_consequence_case_insensitive() {
+    // frameshift_variant is deliberately not covered here since its classification depends on
+    // variant_type (indel length/direction), not just the consequence term; see
+    // test_maf_frameshift_ins_vs_del for that.
     let test_cases = vec![
         ("STOP_GAINED", "Nonsense_Mutation"),
         ("Missense_Variant", "Missense_Mutation"),
-        ("FRAMESHIFT_VARIANT", "Frame_Shift_Del"),
         ("Synonymous_Variant", "Silent"),
         ("SPLICE_DONOR_VARIANT", "Splice_Site"),
     ];
@@ -2161,7 +2163,9 @@ fn test_maf_frameshift_ins_vs_del() {
     assert_eq!(maf_del.variant_classification, "Frame_Shift_Del");
     assert_eq!(maf_del.variant_type, "DEL");
 
-    // Frameshift SNP-like (same length): defaults to Del
+    // Frameshift tag on a same-length substitution: not a real indel, so neither the
+    // Frame_Shift_Ins nor Frame_Shift_Del branch applies. Confirmed against vcf2maf's own
+    // GetVariantClassification, which falls through to its catch-all in this case too.
     let mut info_snp = HashMap::new();
     info_snp.insert("CSQ_Consequence".to_string(), "frameshift_variant".to_string());
     let record_snp = create_test_maf_record(
@@ -2170,7 +2174,7 @@ fn test_maf_frameshift_ins_vs_del() {
     let maf_snp = MafRecord::from_reformatted_record(
         &record_snp, "TestCenter", "GRCh38", "SAMPLE-001",
     ).unwrap();
-    assert_eq!(maf_snp.variant_classification, "Frame_Shift_Del");
+    assert_eq!(maf_snp.variant_classification, "Targeted_Region");
 }
 
 #[test]

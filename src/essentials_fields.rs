@@ -2,8 +2,6 @@ use crate::extract_sample_info::ParsedFormatSample;
 use crate::reformat_vcf::ReformattedVcfRecord;
 use std::collections::HashMap;
 
-type ClassificationRule = (fn(&str) -> bool, &'static str);
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct MafRecord {
     pub hugo_symbol: String,
@@ -49,6 +47,7 @@ impl MafRecord {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Determine variant type and get proper MAF positions/alleles
         let variant_type = Self::determine_variant_type(&record.reference, &record.alternate);
+        let inframe = record.reference.len().abs_diff(record.alternate.len()) % 3 == 0;
         let (start_pos, end_pos) = Self::calculate_maf_positions(
             record.position,
             &record.reference,
@@ -97,7 +96,11 @@ impl MafRecord {
             start_position: start_pos,                                  // Use MAF positions
             end_position: end_pos,                                      // Use MAF positions
             strand: Self::get_strand(&record.info_fields),
-            variant_classification: Self::get_variant_classification(&record.info_fields, &variant_type),
+            variant_classification: Self::get_variant_classification(
+                &record.info_fields,
+                &variant_type,
+                inframe,
+            ),
             variant_type,
             reference_allele: ref_allele, // Use MAF alleles
             tumor_seq_allele1,            // Use MAF alleles
@@ -396,65 +399,246 @@ impl MafRecord {
     }
 
     fn determine_variant_type(reference: &str, alternate: &str) -> String {
-        if reference.len() == 1 && alternate.len() == 1 {
-            "SNP".to_string()
-        } else if reference.len() < alternate.len() {
+        if reference.len() < alternate.len() {
             "INS".to_string()
         } else if reference.len() > alternate.len() {
             "DEL".to_string()
         } else {
-            "ONP".to_string()
+            match reference.len() {
+                1 => "SNP",
+                2 => "DNP",
+                3 => "TNP",
+                _ => "ONP",
+            }
+            .to_string()
         }
     }
 
-    fn get_variant_classification(info_fields: &HashMap<String, String>, variant_type: &str) -> String {
+    fn get_variant_classification(
+        info_fields: &HashMap<String, String>,
+        variant_type: &str,
+        inframe: bool,
+    ) -> String {
         match Self::get_annotation_field(info_fields, &["CSQ_Consequence", "ANN_Annotation"]) {
-            Some(consequence) => Self::map_consequence_to_maf(&consequence, info_fields, variant_type),
+            Some(consequence) => Self::map_consequence_to_maf(&consequence, variant_type, inframe),
             None => Self::classify_by_impact(info_fields),
         }
     }
 
-    /// Ordered by severity (HIGH > MODERATE > LOW > MODIFIER). `frameshift` is
-    /// handled separately since its classification depends on `variant_type`.
-    const CLASSIFICATION_RULES: &'static [ClassificationRule] = &[
-        (|c| c.contains("stop_gained") || c.contains("nonsense"), "Nonsense_Mutation"),
-        (|c| c.contains("splice") && (c.contains("acceptor") || c.contains("donor")), "Splice_Site"),
-        (|c| c.contains("start_lost") || c.contains("initiator_codon_variant"), "Translation_Start_Site"),
-        (|c| c.contains("stop_lost"), "Nonstop_Mutation"),
-        (|c| c.contains("missense") || c.contains("rare_amino_acid_variant"), "Missense_Mutation"),
-        (|c| c.contains("inframe_insertion"), "In_Frame_Ins"),
-        (|c| c.contains("inframe_deletion"), "In_Frame_Del"),
-        (|c| c.contains("synonymous") || c.contains("silent") || c.contains("stop_retained_variant"), "Silent"),
-        (|c| c.contains("splice_region"), "Splice_Region"),
-        // Specific UTR types are checked before anything more generic.
-        (|c| c.contains("5_prime_utr"), "5'UTR"),
-        (|c| c.contains("3_prime_utr"), "3'UTR"),
-        (|c| c.contains("upstream_gene_variant"), "5'Flank"),
-        (|c| c.contains("downstream_gene_variant"), "3'Flank"),
-        (|c| c.contains("non_coding_transcript"), "RNA"),
-        (|c| c.contains("regulatory_region") || c.contains("tf_binding_site"), "Targeted_Region"),
-        (|c| c.contains("intronic") || c.contains("intron"), "Intron"),
-        (|c| c.contains("intergenic"), "IGR"),
+    /// Sequence Ontology term severity ranks, ported from vcf2maf's `%effectPriority`
+    /// (mskcc/vcf2maf, GetEffectPriority) so consequence resolution matches the reference
+    /// tool exactly rather than picking whichever `&`-joined term happens to appear first.
+    /// Lower number = more severe. Unrecognized terms default to 20, same as vcf2maf.
+    const EFFECT_PRIORITY: &'static [(&'static str, u8)] = &[
+        ("transcript_ablation", 1),
+        ("exon_loss_variant", 1),
+        ("sequence_feature + exon_loss_variant", 1),
+        ("feature_ablation", 1),
+        ("chromosome_number_variation", 1),
+        ("bidirectional_gene_fusion", 2),
+        ("duplication", 2),
+        ("gene_fusion", 2),
+        ("inversion", 2),
+        ("splice_donor_variant", 2),
+        ("splice_acceptor_variant", 2),
+        ("stop_gained", 3),
+        ("frameshift_variant", 3),
+        ("stop_lost", 3),
+        ("initiator_codon_variant+non_canonical_start_codon", 4),
+        ("rearranged_at_dna_level", 4),
+        ("start_lost", 4),
+        ("initiator_codon_variant", 4),
+        ("transcript_amplification", 4),
+        ("feature_elongation", 4),
+        ("feature_truncation", 4),
+        ("disruptive_inframe_insertion", 5),
+        ("disruptive_inframe_deletion", 5),
+        ("conservative_inframe_insertion", 5),
+        ("conservative_inframe_deletion", 5),
+        ("inframe_insertion", 5),
+        ("inframe_deletion", 5),
+        ("protein_altering_variant", 5),
+        ("missense_variant", 6),
+        ("conservative_missense_variant", 6),
+        ("rare_amino_acid_variant", 6),
+        ("5_prime_utr_truncation + exon_loss_variant", 8),
+        ("protein_protein_contact", 8),
+        ("3_prime_utr_truncation + exon_loss", 8),
+        ("structural_interaction_variant", 8),
+        ("splice_branch_variant", 8),
+        ("splice_region_variant", 8),
+        ("splice_donor_5th_base_variant", 8),
+        ("splice_donor_region_variant", 8),
+        ("splice_polypyrimidine_tract_variant", 8),
+        ("start_retained_variant", 9),
+        ("stop_retained_variant", 9),
+        ("synonymous_variant", 9),
+        ("start_retained", 9),
+        ("incomplete_terminal_codon_variant", 10),
+        ("coding_sequence_variant", 11),
+        ("mature_mirna_variant", 11),
+        ("exon_variant", 11),
+        ("transcript_variant", 11),
+        ("5_prime_utr_variant", 12),
+        ("5_prime_utr_premature_start_codon_gain_variant", 12),
+        ("3_prime_utr_variant", 12),
+        ("non_coding_exon_variant", 13),
+        ("non_coding_transcript_exon_variant", 13),
+        ("non_coding_transcript_variant", 14),
+        ("nc_transcript_variant", 14),
+        ("intron_variant", 14),
+        ("intragenic_variant", 14),
+        ("intragenic", 14),
+        ("nmd_transcript_variant", 15),
+        ("coding_transcript_variant", 15),
+        ("upstream_gene_variant", 16),
+        ("downstream_gene_variant", 16),
+        ("tfbs_ablation", 17),
+        ("tfbs_amplification", 17),
+        ("tf_binding_site_variant", 17),
+        ("regulatory_region_ablation", 17),
+        ("regulatory_region_amplification", 17),
+        ("regulatory_region_variant", 17),
+        ("regulatory_region", 17),
+        ("mirna", 17),
+        ("intergenic_variant", 19),
+        ("intergenic_region", 19),
+        ("sequence_feature", 19),
+        ("conserved_intron_variant", 19),
+        ("gene_variant", 19),
+        ("conserved_intergenic_variant", 20),
+        ("sequence_variant", 20),
+        ("custom", 20),
     ];
 
-    fn map_consequence_to_maf(consequence: &str, info_fields: &HashMap<String, String>, variant_type: &str) -> String {
-        let consequence_lower = consequence.to_lowercase();
+    fn effect_priority(term: &str) -> u8 {
+        Self::EFFECT_PRIORITY
+            .iter()
+            .find(|(name, _)| *name == term)
+            .map(|(_, priority)| *priority)
+            .unwrap_or(20)
+    }
 
-        // A variant can carry multiple consequences separated by &, |, or ,;
-        // the first one that matches a rule determines severity.
-        for cons in consequence_lower.split(&['&', '|', ','][..]).map(|s| s.trim()) {
-            if cons.contains("frameshift") {
-                let classification = if variant_type == "INS" { "Frame_Shift_Ins" } else { "Frame_Shift_Del" };
-                return classification.to_string();
-            }
-            if let Some((_, classification)) =
-                Self::CLASSIFICATION_RULES.iter().find(|(predicate, _)| predicate(cons))
-            {
-                return classification.to_string();
-            }
+    /// Resolve a (possibly `&`/`,`/`|`-joined) multi-term consequence string down to the
+    /// single most severe term, mirroring vcf2maf's sort-by-priority-then-take-first.
+    fn resolve_one_consequence(consequence: &str) -> String {
+        consequence
+            .split(&['&', '|', ','][..])
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .min_by_key(|term| Self::effect_priority(term))
+            .unwrap_or("intergenic_variant")
+            .to_string()
+    }
+
+    /// Ported from vcf2maf's `GetVariantClassification`: classifies the single most-severe
+    /// consequence term, using variant_type/inframe only to disambiguate the terms whose MAF
+    /// classification depends on them (frameshift_variant, protein_altering_variant).
+    fn map_consequence_to_maf(consequence: &str, variant_type: &str, inframe: bool) -> String {
+        let term = Self::resolve_one_consequence(&consequence.to_lowercase());
+
+        if matches!(term.as_str(), "splice_acceptor_variant" | "splice_donor_variant") {
+            return "Splice_Site".to_string();
+        }
+        if term == "stop_gained" {
+            return "Nonsense_Mutation".to_string();
+        }
+        let is_frameshift_like = term == "frameshift_variant"
+            || (term == "protein_altering_variant" && !inframe);
+        if is_frameshift_like && variant_type == "DEL" {
+            return "Frame_Shift_Del".to_string();
+        }
+        if is_frameshift_like && variant_type == "INS" {
+            return "Frame_Shift_Ins".to_string();
+        }
+        if term == "stop_lost" {
+            return "Nonstop_Mutation".to_string();
+        }
+        if matches!(term.as_str(), "initiator_codon_variant" | "start_lost") {
+            return "Translation_Start_Site".to_string();
+        }
+        let is_inframe_ins = term.ends_with("inframe_insertion")
+            || (term == "protein_altering_variant" && inframe && variant_type == "INS");
+        if is_inframe_ins {
+            return "In_Frame_Ins".to_string();
+        }
+        let is_inframe_del = term.ends_with("inframe_deletion")
+            || (term == "protein_altering_variant" && inframe && variant_type == "DEL");
+        if is_inframe_del {
+            return "In_Frame_Del".to_string();
+        }
+        if matches!(
+            term.as_str(),
+            "missense_variant" | "coding_sequence_variant" | "conservative_missense_variant" | "rare_amino_acid_variant"
+        ) {
+            return "Missense_Mutation".to_string();
+        }
+        if matches!(
+            term.as_str(),
+            "transcript_amplification" | "intron_variant" | "intragenic" | "intragenic_variant"
+        ) {
+            return "Intron".to_string();
+        }
+        if matches!(
+            term.as_str(),
+            "splice_region_variant"
+                | "splice_donor_5th_base_variant"
+                | "splice_donor_region_variant"
+                | "splice_polypyrimidine_tract_variant"
+        ) {
+            return "Splice_Region".to_string();
+        }
+        if matches!(
+            term.as_str(),
+            "incomplete_terminal_codon_variant"
+                | "synonymous_variant"
+                | "stop_retained_variant"
+                | "start_retained_variant"
+                | "nmd_transcript_variant"
+        ) {
+            return "Silent".to_string();
+        }
+        if matches!(
+            term.as_str(),
+            "mature_mirna_variant"
+                | "exon_variant"
+                | "non_coding_exon_variant"
+                | "non_coding_transcript_exon_variant"
+                | "non_coding_transcript_variant"
+                | "nc_transcript_variant"
+        ) {
+            return "RNA".to_string();
+        }
+        if matches!(
+            term.as_str(),
+            "5_prime_utr_variant" | "5_prime_utr_premature_start_codon_gain_variant"
+        ) {
+            return "5'UTR".to_string();
+        }
+        if term == "3_prime_utr_variant" {
+            return "3'UTR".to_string();
+        }
+        if matches!(
+            term.as_str(),
+            "tf_binding_site_variant"
+                | "regulatory_region_variant"
+                | "regulatory_region"
+                | "intergenic_variant"
+                | "intergenic_region"
+        ) {
+            return "IGR".to_string();
+        }
+        if term == "upstream_gene_variant" {
+            return "5'Flank".to_string();
+        }
+        if term == "downstream_gene_variant" {
+            return "3'Flank".to_string();
         }
 
-        Self::classify_by_impact(info_fields)
+        // Everything else (TFBS/regulatory ablation/amplification, feature_elongation/
+        // truncation, coding_transcript_variant, sequence_variant, ...): vcf2maf's own
+        // catch-all.
+        "Targeted_Region".to_string()
     }
 
     fn classify_by_impact(info_fields: &HashMap<String, String>) -> String {

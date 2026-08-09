@@ -72,6 +72,25 @@ pub fn count_multiallelic_sites(data_lines: &[String]) -> usize {
         .count()
 }
 
+/// Count VCF data lines whose CSQ (VEP) or ANN (SnpEff) annotation field lists more than one
+/// comma-separated transcript entry. Used to warn that `first`-mode transcript handling (which
+/// keeps literal CSQ/ANN order, not severity order) may pick an arbitrary non-most-severe
+/// transcript for such sites — VEP only guarantees one entry per variant when run with `--pick`.
+pub fn count_multi_transcript_sites(data_lines: &[String]) -> usize {
+    data_lines
+        .iter()
+        .filter(|line| {
+            line.split('\t')
+                .nth(7)
+                .and_then(|info| {
+                    info.split(';')
+                        .find_map(|field| field.strip_prefix("CSQ=").or_else(|| field.strip_prefix("ANN=")))
+                })
+                .is_some_and(|annotation| annotation.contains(','))
+        })
+        .count()
+}
+
 /// Count variants per chromosome from raw VCF data lines.
 /// Each line starts with the chromosome name followed by a tab.
 pub fn count_input_chromosomes(data_lines: &[String]) -> IndexMap<String, usize> {
