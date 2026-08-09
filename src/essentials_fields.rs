@@ -21,20 +21,23 @@ pub struct MafRecord {
     pub dbsnp_val_status: Option<String>,
     pub tumor_sample_barcode: String,
     pub matched_norm_sample_barcode: Option<String>,
-    pub mutation_status: String,
     pub validation_status: Option<String>,
-    pub sequencer: Option<String>,
+    pub mutation_status: String,
     pub sequence_source: String,
-    pub depth: Option<u32>,
-    pub total_depth: Option<u32>,
-    pub vaf: Option<f32>,
-    pub hgvsp: Option<String>,
+    pub sequencer: Option<String>,
     pub hgvsc: Option<String>,
-    // NEW FIELDS
-    pub qual: Option<f64>,                // VCF QUAL score
-    pub filter_status: String,            // VCF FILTER field
-    pub transcript_id: Option<String>,    // Transcript ID from annotations
-    pub protein_position: Option<String>, // Protein position from annotations
+    pub hgvsp: Option<String>,
+    pub hgvsp_short: Option<String>,
+    pub transcript_id: Option<String>,
+    pub exon_number: Option<String>,
+    pub t_depth: Option<u32>,      // was `total_depth` — INFO DP, unchanged extraction
+    pub t_ref_count: Option<u32>,  // new — INFO RO / sample AD[0]
+    pub t_alt_count: Option<u32>,  // was `depth` — INFO AO / sample AD[1], unchanged extraction
+    // Trailing custom columns (this tool's own additions, not part of vcf2maf's core 46):
+    pub filter_status: String,
+    pub qual: Option<f64>,
+    pub vaf: Option<f32>,
+    pub protein_position: Option<String>,
 }
 
 impl MafRecord {
@@ -57,31 +60,32 @@ impl MafRecord {
         let (ref_allele, tumor_seq_allele1, tumor_seq_allele2) =
             Self::get_maf_alleles(&record.reference, &record.alternate, &variant_type);
 
-        // Extract depth information
-        let mut tumor_depth = Self::extract_tumor_depth(&record.info_fields);
-        let mut total_depth = Self::extract_total_depth(&record.info_fields);
-        let mut tumor_ref_depth = Self::extract_ref_depth(&record.info_fields);
+        let mut t_alt_count = Self::extract_tumor_depth(&record.info_fields);
+        let mut t_depth = Self::extract_total_depth(&record.info_fields);
+        let mut t_ref_count = Self::extract_ref_depth(&record.info_fields);
 
-        // Fallback to sample data if INFO fields don't have depth
-        if tumor_depth.is_none() || total_depth.is_none() || tumor_ref_depth.is_none() {
+        if t_alt_count.is_none() || t_depth.is_none() || t_ref_count.is_none() {
             let (sample_total, sample_ref, sample_alt) =
                 Self::extract_depth_from_sample_data(&record.format_sample_data);
-            if tumor_depth.is_none() {
-                tumor_depth = sample_alt;
+            if t_alt_count.is_none() {
+                t_alt_count = sample_alt;
             }
-            if total_depth.is_none() {
-                total_depth = sample_total;
+            if t_depth.is_none() {
+                t_depth = sample_total;
             }
-            if tumor_ref_depth.is_none() {
-                tumor_ref_depth = sample_ref;
+            if t_ref_count.is_none() {
+                t_ref_count = sample_ref;
             }
         }
 
-        // Calculate VAF if we have both tumor and total depth
-        let vaf = match (tumor_depth, total_depth) {
-            (Some(t_depth), Some(total)) if total > 0 => Some(t_depth as f32 / total as f32),
+        let vaf = match (t_alt_count, t_depth) {
+            (Some(alt), Some(total)) if total > 0 => Some(alt as f32 / total as f32),
             _ => None,
         };
+
+        let hgvsp = Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSp", "ANN_HGVS_p"])
+            .filter(|s| s != ".");
+        let hgvsp_short = hgvsp.as_deref().map(Self::hgvsp_to_short);
 
         Ok(MafRecord {
             hugo_symbol: Self::get_annotation_field(
@@ -96,9 +100,9 @@ impl MafRecord {
                 center.to_string()
             },
             ncbi_build: ncbi_build.to_string(),
-            chromosome: Self::normalize_chromosome(&record.chromosome), // Now normalize consistently
-            start_position: start_pos,                                  // Use MAF positions
-            end_position: end_pos,                                      // Use MAF positions
+            chromosome: Self::normalize_chromosome(&record.chromosome),
+            start_position: start_pos,
+            end_position: end_pos,
             strand: Self::get_strand(&record.info_fields),
             variant_classification: Self::get_variant_classification(
                 &record.info_fields,
@@ -106,27 +110,29 @@ impl MafRecord {
                 inframe,
             ),
             variant_type,
-            reference_allele: ref_allele, // Use MAF alleles
-            tumor_seq_allele1,            // Use MAF alleles
-            tumor_seq_allele2,            // Use MAF alleles
+            reference_allele: ref_allele,
+            tumor_seq_allele1,
+            tumor_seq_allele2,
             dbsnp_rs: record.id.clone().filter(|id| id != "."),
             dbsnp_val_status: None,
             tumor_sample_barcode: sample_barcode.to_string(),
             matched_norm_sample_barcode: None,
-            mutation_status: "Somatic".to_string(),
             validation_status: None,
-            sequencer: Self::extract_sequencing_info(&record.info_fields),
+            mutation_status: "Somatic".to_string(),
             sequence_source: "WXS".to_string(),
-            depth: tumor_depth,
-            total_depth,
-            vaf,
-            hgvsp: Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSp", "ANN_HGVS_p"])
-                .filter(|s| s != "."),
+            sequencer: Self::extract_sequencing_info(&record.info_fields),
             hgvsc: Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSc", "ANN_HGVS_c"])
                 .filter(|s| s != "."),
-            qual: record.quality,
-            filter_status: record.filter.clone(),
+            hgvsp,
+            hgvsp_short,
             transcript_id: Self::get_transcript_id(&record.info_fields),
+            exon_number: Self::get_exon_number(&record.info_fields),
+            t_depth,
+            t_ref_count,
+            t_alt_count,
+            filter_status: record.filter.clone(),
+            qual: record.quality,
+            vaf,
             protein_position: Self::get_protein_position(&record.info_fields),
         })
     }
@@ -199,10 +205,10 @@ impl MafRecord {
             if let Some(allele_depth) =
                 Self::extract_tumor_depth_for_allele(&record.info_fields, alt_index)
             {
-                maf_record.depth = Some(allele_depth);
+                maf_record.t_alt_count = Some(allele_depth);
 
                 // Recalculate VAF with allele-specific depth
-                if let Some(total) = maf_record.total_depth {
+                if let Some(total) = maf_record.t_depth {
                     if total > 0 {
                         maf_record.vaf = Some(allele_depth as f32 / total as f32);
                     }
@@ -697,39 +703,25 @@ impl MafRecord {
     }
 
     pub fn get_maf_headers() -> Vec<String> {
-        vec![
-            "Hugo_Symbol".to_string(),
-            "Entrez_Gene_Id".to_string(),
-            "Center".to_string(),
-            "NCBI_Build".to_string(),
-            "Chromosome".to_string(),
-            "Start_Position".to_string(),
-            "End_Position".to_string(),
-            "Strand".to_string(),
-            "Variant_Classification".to_string(),
-            "Variant_Type".to_string(),
-            "Reference_Allele".to_string(),
-            "Tumor_Seq_Allele1".to_string(),
-            "Tumor_Seq_Allele2".to_string(),
-            "dbSNP_RS".to_string(),
-            "dbSNP_Val_Status".to_string(),
-            "Tumor_Sample_Barcode".to_string(),
-            "Matched_Norm_Sample_Barcode".to_string(),
-            "Mutation_Status".to_string(),
-            "Validation_Status".to_string(),
-            "Sequencer".to_string(),
-            "Sequence_Source".to_string(),
-            "t_depth".to_string(),
-            "total_depth".to_string(),
-            "VAF".to_string(),
-            "HGVSp".to_string(),
-            "HGVSc".to_string(),
-            // NEW HEADERS
-            "QUAL".to_string(),             // VCF quality score
-            "FILTER".to_string(),           // VCF filter status
-            "Transcript_ID".to_string(),    // Transcript identifier
-            "Protein_Position".to_string(), // Protein position
+        [
+            "Hugo_Symbol", "Entrez_Gene_Id", "Center", "NCBI_Build", "Chromosome",
+            "Start_Position", "End_Position", "Strand", "Variant_Classification",
+            "Variant_Type", "Reference_Allele", "Tumor_Seq_Allele1", "Tumor_Seq_Allele2",
+            "dbSNP_RS", "dbSNP_Val_Status", "Tumor_Sample_Barcode",
+            "Matched_Norm_Sample_Barcode", "Match_Norm_Seq_Allele1", "Match_Norm_Seq_Allele2",
+            "Tumor_Validation_Allele1", "Tumor_Validation_Allele2",
+            "Match_Norm_Validation_Allele1", "Match_Norm_Validation_Allele2",
+            "Verification_Status", "Validation_Status", "Mutation_Status",
+            "Sequencing_Phase", "Sequence_Source", "Validation_Method", "Score",
+            "BAM_File", "Sequencer", "Tumor_Sample_UUID", "Matched_Norm_Sample_UUID",
+            "HGVSc", "HGVSp", "HGVSp_Short", "Transcript_ID", "Exon_Number",
+            "t_depth", "t_ref_count", "t_alt_count", "n_depth", "n_ref_count",
+            "n_alt_count", "all_effects",
+            "FILTER", "QUAL", "VAF", "Protein_Position",
         ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     pub fn to_tsv_line(&self) -> String {
@@ -737,8 +729,9 @@ impl MafRecord {
         let entrez = self.entrez_gene_id.map(|id| id.to_string());
         let start = self.start_position.to_string();
         let end = self.end_position.to_string();
-        let depth = self.depth.map(|d| d.to_string());
-        let total_depth = self.total_depth.map(|d| d.to_string());
+        let t_depth = self.t_depth.map(|d| d.to_string());
+        let t_ref_count = self.t_ref_count.map(|d| d.to_string());
+        let t_alt_count = self.t_alt_count.map(|d| d.to_string());
         let vaf = self.vaf.map(|v| format!("{:.4}", v));
         let qual = self.qual.map(|q| q.to_string());
 
@@ -760,18 +753,38 @@ impl MafRecord {
             self.dbsnp_val_status.as_deref().unwrap_or(dot),
             self.tumor_sample_barcode.as_str(),
             self.matched_norm_sample_barcode.as_deref().unwrap_or(dot),
-            self.mutation_status.as_str(),
+            dot, // 18 Match_Norm_Seq_Allele1 — no matched-normal support
+            dot, // 19 Match_Norm_Seq_Allele2
+            dot, // 20 Tumor_Validation_Allele1
+            dot, // 21 Tumor_Validation_Allele2
+            dot, // 22 Match_Norm_Validation_Allele1
+            dot, // 23 Match_Norm_Validation_Allele2
+            dot, // 24 Verification_Status
             self.validation_status.as_deref().unwrap_or(dot),
-            self.sequencer.as_deref().unwrap_or(dot),
+            self.mutation_status.as_str(),
+            dot, // 27 Sequencing_Phase
             self.sequence_source.as_str(),
-            depth.as_deref().unwrap_or(dot),
-            total_depth.as_deref().unwrap_or(dot),
-            vaf.as_deref().unwrap_or(dot),
-            self.hgvsp.as_deref().unwrap_or(dot),
+            dot, // 29 Validation_Method
+            dot, // 30 Score
+            dot, // 31 BAM_File
+            self.sequencer.as_deref().unwrap_or(dot),
+            dot, // 33 Tumor_Sample_UUID
+            dot, // 34 Matched_Norm_Sample_UUID
             self.hgvsc.as_deref().unwrap_or(dot),
-            qual.as_deref().unwrap_or(dot),
-            self.filter_status.as_str(),
+            self.hgvsp.as_deref().unwrap_or(dot),
+            self.hgvsp_short.as_deref().unwrap_or(dot),
             self.transcript_id.as_deref().unwrap_or(dot),
+            self.exon_number.as_deref().unwrap_or(dot),
+            t_depth.as_deref().unwrap_or(dot),
+            t_ref_count.as_deref().unwrap_or(dot),
+            t_alt_count.as_deref().unwrap_or(dot),
+            dot, // 43 n_depth
+            dot, // 44 n_ref_count
+            dot, // 45 n_alt_count
+            dot, // 46 all_effects — see Global Constraints: deferred, needs full transcript list
+            self.filter_status.as_str(),
+            qual.as_deref().unwrap_or(dot),
+            vaf.as_deref().unwrap_or(dot),
             self.protein_position.as_deref().unwrap_or(dot),
         ]
         .join("\t")
@@ -846,5 +859,70 @@ mod tests {
         assert_eq!(total, Some(50));
         assert_eq!(refc, Some(30));
         assert_eq!(alt, Some(20));
+    }
+
+    // Local equivalent of tests/test.rs's `create_test_maf_record` helper — that helper lives
+    // in the integration-test crate and isn't reachable from this unit-test module.
+    fn create_test_maf_record(
+        chromosome: &str,
+        position: u64,
+        reference: &str,
+        alternate: &str,
+        quality: Option<f64>,
+        filter: &str,
+        info_fields: HashMap<String, String>,
+    ) -> ReformattedVcfRecord {
+        ReformattedVcfRecord {
+            chromosome: chromosome.to_string(),
+            position,
+            id: Some("rs123456".to_string()),
+            reference: reference.to_string(),
+            alternate: alternate.to_string(),
+            quality,
+            filter: filter.to_string(),
+            info_fields,
+            format_sample_data: None,
+            annotation_field_type: crate::reformat_vcf::AnnotationFieldType::None,
+        }
+    }
+
+    #[test]
+    fn test_maf_headers_match_vcf2maf_core_46_plus_custom() {
+        let headers = MafRecord::get_maf_headers();
+        assert_eq!(headers.len(), 50);
+        let expected = [
+            "Hugo_Symbol", "Entrez_Gene_Id", "Center", "NCBI_Build", "Chromosome",
+            "Start_Position", "End_Position", "Strand", "Variant_Classification",
+            "Variant_Type", "Reference_Allele", "Tumor_Seq_Allele1", "Tumor_Seq_Allele2",
+            "dbSNP_RS", "dbSNP_Val_Status", "Tumor_Sample_Barcode",
+            "Matched_Norm_Sample_Barcode", "Match_Norm_Seq_Allele1", "Match_Norm_Seq_Allele2",
+            "Tumor_Validation_Allele1", "Tumor_Validation_Allele2",
+            "Match_Norm_Validation_Allele1", "Match_Norm_Validation_Allele2",
+            "Verification_Status", "Validation_Status", "Mutation_Status",
+            "Sequencing_Phase", "Sequence_Source", "Validation_Method", "Score",
+            "BAM_File", "Sequencer", "Tumor_Sample_UUID", "Matched_Norm_Sample_UUID",
+            "HGVSc", "HGVSp", "HGVSp_Short", "Transcript_ID", "Exon_Number",
+            "t_depth", "t_ref_count", "t_alt_count", "n_depth", "n_ref_count",
+            "n_alt_count", "all_effects",
+            "FILTER", "QUAL", "VAF", "Protein_Position",
+        ];
+        assert_eq!(headers, expected.to_vec());
+    }
+
+    #[test]
+    fn test_to_tsv_line_fills_unsupported_columns_with_dot() {
+        let record =
+            create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", HashMap::new());
+        let maf =
+            MafRecord::from_reformatted_record(&record, "TestCenter", "GRCh38", "SAMPLE-001")
+                .unwrap();
+        let tsv = maf.to_tsv_line();
+        let fields: Vec<&str> = tsv.split('\t').collect();
+        assert_eq!(fields.len(), 50);
+        // Match_Norm_Seq_Allele1 (idx 17), Verification_Status (idx 23), Score (idx 29),
+        // n_depth (idx 42), all_effects (idx 45) — all always "."
+        for idx in [17, 23, 29, 42, 45] {
+            assert_eq!(fields[idx], ".", "column {idx} should be '.'");
+        }
     }
 }
