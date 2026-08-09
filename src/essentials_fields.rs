@@ -60,16 +60,20 @@ impl MafRecord {
         // Extract depth information
         let mut tumor_depth = Self::extract_tumor_depth(&record.info_fields);
         let mut total_depth = Self::extract_total_depth(&record.info_fields);
+        let mut tumor_ref_depth = Self::extract_ref_depth(&record.info_fields);
 
         // Fallback to sample data if INFO fields don't have depth
-        if tumor_depth.is_none() || total_depth.is_none() {
-            let (sample_total, sample_alt) =
+        if tumor_depth.is_none() || total_depth.is_none() || tumor_ref_depth.is_none() {
+            let (sample_total, sample_ref, sample_alt) =
                 Self::extract_depth_from_sample_data(&record.format_sample_data);
             if tumor_depth.is_none() {
                 tumor_depth = sample_alt;
             }
             if total_depth.is_none() {
                 total_depth = sample_total;
+            }
+            if tumor_ref_depth.is_none() {
+                tumor_ref_depth = sample_ref;
             }
         }
 
@@ -256,9 +260,10 @@ impl MafRecord {
 
     fn extract_depth_from_sample_data(
         format_sample_data: &Option<ParsedFormatSample>,
-    ) -> (Option<u32>, Option<u32>) {
+    ) -> (Option<u32>, Option<u32>, Option<u32>) {
         if let Some(sample_data) = format_sample_data {
             let mut total_depth = None;
+            let mut ref_depth = None;
             let mut alt_depth = None;
 
             // Check each sample for depth information
@@ -270,9 +275,12 @@ impl MafRecord {
                     }
                 }
 
-                // Alternative depth (AD field - usually comma-separated: ref,alt)
+                // Reference/alternative depth (AD field - usually comma-separated: ref,alt)
                 if let Some(ad) = sample.format_fields.get("AD") {
                     let depths: Vec<&str> = ad.split(',').collect();
+                    if let Some(r) = depths.first().and_then(|d| d.parse::<u32>().ok()) {
+                        ref_depth = Some(r);
+                    }
                     if depths.len() >= 2 {
                         if let Ok(alt_d) = depths[1].parse::<u32>() {
                             alt_depth = Some(alt_d);
@@ -286,9 +294,9 @@ impl MafRecord {
                 }
             }
 
-            (total_depth, alt_depth)
+            (total_depth, ref_depth, alt_depth)
         } else {
-            (None, None)
+            (None, None, None)
         }
     }
 
@@ -303,6 +311,14 @@ impl MafRecord {
             let first_value = s.split(',').next().unwrap_or(&s);
             first_value.parse().ok()
         })
+    }
+
+    /// freebayes-style INFO `RO` (Reference Observation count) is this tool's only
+    /// direct source for t_ref_count; sample-level `AD[0]` is the fallback (see
+    /// `extract_depth_from_sample_data`), mirroring how `extract_tumor_depth` already
+    /// falls back from INFO `AO` to sample `AD[1]`.
+    fn extract_ref_depth(info_fields: &HashMap<String, String>) -> Option<u32> {
+        Self::get_annotation_field(info_fields, &["INFO_RO"]).and_then(|s| s.parse().ok())
     }
 
     /// Extract sequencing platform or variant calling tool info
@@ -798,5 +814,37 @@ mod tests {
     fn test_get_exon_number_none_when_absent() {
         let info = HashMap::new();
         assert_eq!(MafRecord::get_exon_number(&info), None);
+    }
+
+    #[test]
+    fn test_extract_ref_depth_from_info_ro() {
+        let mut info = HashMap::new();
+        info.insert("INFO_RO".to_string(), "42".to_string());
+        assert_eq!(MafRecord::extract_ref_depth(&info), Some(42));
+    }
+
+    #[test]
+    fn test_extract_ref_depth_none_when_absent() {
+        let info = HashMap::new();
+        assert_eq!(MafRecord::extract_ref_depth(&info), None);
+    }
+
+    #[test]
+    fn test_extract_depth_from_sample_data_returns_ref_and_alt() {
+        use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
+        let mut format_fields = HashMap::new();
+        format_fields.insert("DP".to_string(), "50".to_string());
+        format_fields.insert("AD".to_string(), "30,20".to_string());
+        let sample_data = Some(ParsedFormatSample {
+            format_keys: vec!["DP".to_string(), "AD".to_string()],
+            samples: vec![ParsedSample {
+                sample_name: "SAMPLE-001".to_string(),
+                format_fields,
+            }],
+        });
+        let (total, refc, alt) = MafRecord::extract_depth_from_sample_data(&sample_data);
+        assert_eq!(total, Some(50));
+        assert_eq!(refc, Some(30));
+        assert_eq!(alt, Some(20));
     }
 }
