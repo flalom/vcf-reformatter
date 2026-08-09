@@ -152,6 +152,12 @@ impl MafRecord {
         )
     }
 
+    /// VEP's `EXON` and SnpEff's `Rank` are both formatted `<rank>/<total>` and are
+    /// vcf2maf's source for the MAF `Exon_Number` column.
+    fn get_exon_number(info_fields: &HashMap<String, String>) -> Option<String> {
+        Self::get_annotation_field(info_fields, &["CSQ_EXON", "ANN_Rank"])
+    }
+
     /// Handle multi-allelic variants by creating separate MafRecord for each alternate allele
     pub fn from_reformatted_record_multi(
         record: &ReformattedVcfRecord,
@@ -771,5 +777,26 @@ mod tests {
     fn test_hgvsp_to_short_passes_through_non_matching_input() {
         assert_eq!(MafRecord::hgvsp_to_short(""), "");
         assert_eq!(MafRecord::hgvsp_to_short("."), ".");
+    }
+
+    #[test]
+    fn test_get_exon_number_prefers_vep_exon_field() {
+        let mut info = HashMap::new();
+        info.insert("CSQ_EXON".to_string(), "3/10".to_string());
+        info.insert("ANN_Rank".to_string(), "4/12".to_string());
+        assert_eq!(MafRecord::get_exon_number(&info), Some("3/10".to_string()));
+    }
+
+    #[test]
+    fn test_get_exon_number_falls_back_to_snpeff_rank() {
+        let mut info = HashMap::new();
+        info.insert("ANN_Rank".to_string(), "4/12".to_string());
+        assert_eq!(MafRecord::get_exon_number(&info), Some("4/12".to_string()));
+    }
+
+    #[test]
+    fn test_get_exon_number_none_when_absent() {
+        let info = HashMap::new();
+        assert_eq!(MafRecord::get_exon_number(&info), None);
     }
 }
