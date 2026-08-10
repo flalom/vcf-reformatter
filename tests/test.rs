@@ -1368,7 +1368,7 @@ fn test_maf_headers_completeness() {
 
     let headers = MafRecord::get_maf_headers();
 
-    // Test that all required MAF headers are present
+    // Test that all required MAF headers are present (vcf2maf-parity 50-column layout)
     let expected_headers = vec![
         "Hugo_Symbol",
         "Entrez_Gene_Id",
@@ -1387,18 +1387,38 @@ fn test_maf_headers_completeness() {
         "dbSNP_Val_Status",
         "Tumor_Sample_Barcode",
         "Matched_Norm_Sample_Barcode",
-        "Mutation_Status",
+        "Match_Norm_Seq_Allele1",
+        "Match_Norm_Seq_Allele2",
+        "Tumor_Validation_Allele1",
+        "Tumor_Validation_Allele2",
+        "Match_Norm_Validation_Allele1",
+        "Match_Norm_Validation_Allele2",
+        "Verification_Status",
         "Validation_Status",
-        "Sequencer",
+        "Mutation_Status",
+        "Sequencing_Phase",
         "Sequence_Source",
-        "t_depth",
-        "total_depth",
-        "VAF",
-        "HGVSp",
+        "Validation_Method",
+        "Score",
+        "BAM_File",
+        "Sequencer",
+        "Tumor_Sample_UUID",
+        "Matched_Norm_Sample_UUID",
         "HGVSc",
-        "QUAL",
-        "FILTER",
+        "HGVSp",
+        "HGVSp_Short",
         "Transcript_ID",
+        "Exon_Number",
+        "t_depth",
+        "t_ref_count",
+        "t_alt_count",
+        "n_depth",
+        "n_ref_count",
+        "n_alt_count",
+        "all_effects",
+        "FILTER",
+        "QUAL",
+        "VAF",
         "Protein_Position",
     ];
 
@@ -1634,7 +1654,9 @@ fn test_maf_missing_annotations() {
         MafRecord::from_reformatted_record(&record, "TEST_CENTER", "GRCh38", "TEST_SAMPLE")
             .unwrap();
 
-    assert_eq!(maf_record.hugo_symbol, "."); // Should use placeholder
+    // No SYMBOL and no transcript at all (pure IGR case) -- vcf2maf never leaves Hugo_Symbol
+    // blank, falling back to "Unknown" here since there's no transcript ID to fall back to either.
+    assert_eq!(maf_record.hugo_symbol, "Unknown");
     assert_eq!(maf_record.qual, None);
     assert_eq!(maf_record.filter_status, ".");
     assert_eq!(maf_record.transcript_id, None);
@@ -1671,10 +1693,10 @@ fn test_maf_tsv_line_format() {
     assert_eq!(fields[3], "GRCh38"); // NCBI_Build
     assert_eq!(fields[4], "7"); // Chromosome (now normalized)
     assert_eq!(fields[5], "55191822"); // Start_Position
-    assert_eq!(fields[26], "99.9"); // QUAL
-    assert_eq!(fields[27], "PASS"); // FILTER
-    assert_eq!(fields[28], "ENST00000275493"); // Transcript_ID
-    assert_eq!(fields[29], "858"); // Protein_Position
+    assert_eq!(fields[37], "ENST00000275493"); // Transcript_ID
+    assert_eq!(fields[46], "PASS"); // FILTER
+    assert_eq!(fields[47], "99.9"); // QUAL
+    assert_eq!(fields[49], "858"); // Protein_Position
 }
 #[test]
 fn test_maf_chromosome_normalization() {
@@ -1843,17 +1865,17 @@ fn test_maf_depth_extraction() {
             .unwrap();
 
     // Verify depth extraction - test what your implementation actually returns
-    assert_eq!(maf_record.total_depth, Some(200));
+    assert_eq!(maf_record.t_depth, Some(200));
 
     // Your implementation might extract depth differently
     // Test both possibilities
-    if let Some(depth) = maf_record.depth {
+    if let Some(depth) = maf_record.t_alt_count {
         // If depth is extracted, it should be reasonable
         assert!(depth <= 200);
     }
 
     // Test VAF calculation if both values are present
-    if let (Some(depth), Some(total)) = (maf_record.depth, maf_record.total_depth) {
+    if let (Some(depth), Some(total)) = (maf_record.t_alt_count, maf_record.t_depth) {
         if let Some(vaf) = maf_record.vaf {
             let expected_vaf = depth as f32 / total as f32;
             assert!((vaf - expected_vaf).abs() < 0.001);

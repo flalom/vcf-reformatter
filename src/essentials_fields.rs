@@ -86,13 +86,10 @@ impl MafRecord {
         let hgvsp = Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSp", "ANN_HGVS_p"])
             .filter(|s| s != ".");
         let hgvsp_short = hgvsp.as_deref().map(Self::hgvsp_to_short);
+        let transcript_id = Self::get_transcript_id(&record.info_fields);
 
         Ok(MafRecord {
-            hugo_symbol: Self::get_annotation_field(
-                &record.info_fields,
-                &["ANN_Gene_Name", "CSQ_SYMBOL", "ANN_SYMBOL"],
-            )
-            .unwrap_or(".".to_string()),
+            hugo_symbol: Self::get_hugo_symbol(&record.info_fields, &transcript_id),
             entrez_gene_id: Self::get_entrez_gene_id(&record.info_fields),
             center: if center.trim().is_empty() {
                 "Unknown_Center".to_string()
@@ -125,7 +122,7 @@ impl MafRecord {
                 .filter(|s| s != "."),
             hgvsp,
             hgvsp_short,
-            transcript_id: Self::get_transcript_id(&record.info_fields),
+            transcript_id: transcript_id.clone(),
             exon_number: Self::get_exon_number(&record.info_fields),
             t_depth,
             t_ref_count,
@@ -166,6 +163,19 @@ impl MafRecord {
     /// vcf2maf's source for the MAF `Exon_Number` column.
     fn get_exon_number(info_fields: &HashMap<String, String>) -> Option<String> {
         Self::get_annotation_field(info_fields, &["CSQ_EXON", "ANN_Rank"])
+    }
+
+    /// vcf2maf never leaves Hugo_Symbol blank: upstream/downstream/intronic-lncRNA/IGR variants
+    /// often carry a Gene ID with no HGNC symbol mapping, so VEP's SYMBOL field is empty. vcf2maf
+    /// falls back to the transcript ID when one is associated, or the literal "Unknown" when
+    /// there's no transcript either (pure IGR) — matched here for exact parity.
+    fn get_hugo_symbol(
+        info_fields: &HashMap<String, String>,
+        transcript_id: &Option<String>,
+    ) -> String {
+        Self::get_annotation_field(info_fields, &["ANN_Gene_Name", "CSQ_SYMBOL", "ANN_SYMBOL"])
+            .or_else(|| transcript_id.clone())
+            .unwrap_or_else(|| "Unknown".to_string())
     }
 
     /// Handle multi-allelic variants by creating separate MafRecord for each alternate allele
@@ -827,6 +837,31 @@ mod tests {
     fn test_get_exon_number_none_when_absent() {
         let info = HashMap::new();
         assert_eq!(MafRecord::get_exon_number(&info), None);
+    }
+
+    #[test]
+    fn test_get_hugo_symbol_prefers_annotated_symbol() {
+        let mut info = HashMap::new();
+        info.insert("CSQ_SYMBOL".to_string(), "BRCA1".to_string());
+        assert_eq!(
+            MafRecord::get_hugo_symbol(&info, &Some("ENST00000123456".to_string())),
+            "BRCA1"
+        );
+    }
+
+    #[test]
+    fn test_get_hugo_symbol_falls_back_to_transcript_id_when_symbol_missing() {
+        let info = HashMap::new();
+        assert_eq!(
+            MafRecord::get_hugo_symbol(&info, &Some("ENST00000620188".to_string())),
+            "ENST00000620188"
+        );
+    }
+
+    #[test]
+    fn test_get_hugo_symbol_falls_back_to_unknown_when_no_symbol_or_transcript() {
+        let info = HashMap::new();
+        assert_eq!(MafRecord::get_hugo_symbol(&info, &None), "Unknown");
     }
 
     #[test]
