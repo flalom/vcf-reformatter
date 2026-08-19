@@ -164,7 +164,7 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = ReportFormatCli::Html)]
     report: ReportFormatCli,
 
-    /// Output in Apache Parquet format instead of text
+    /// Also write an Apache Parquet copy of the output, alongside the text file
     #[arg(long)]
     parquet: bool,
 }
@@ -426,6 +426,17 @@ fn main() {
         eprintln!("   To get one ALT per line instead, normalize first: bcftools norm -m- <input>");
     }
 
+    if transcript_handling == TranscriptHandling::FirstOnly {
+        let multi_transcript_count = summary::count_multi_transcript_sites(&data.2);
+        if multi_transcript_count > 0 {
+            eprintln!(
+                "⚠️  Warning: {multi_transcript_count} site(s) annotated against more than one transcript, but -t first is in use."
+            );
+            eprintln!("   'first' keeps literal CSQ/ANN order, which is not severity order, so the reported");
+            eprintln!("   consequence may not be the most severe one. Use -t most-severe, or re-run VEP with --pick.");
+        }
+    }
+
     if cli.verbose && data.2.len() > 50_000 {
         println!(
             "   📊 Large dataset detected - processing {} variants in optimized chunks...",
@@ -492,7 +503,17 @@ fn main() {
                 // Use chunked processing if:
                 // 1. Large input (>100K variants) OR
                 // 2. Large estimated output (>500K records)
-                if data.2.len() > 100_000 || estimated_output_records > 500_000 {
+                // ponytail: --parquet opts out — the parquet writer needs every record in
+                // memory at once, and chunked processing streams them straight to the TSV
+                // and hands back an empty Vec, which silently produced no parquet file.
+                let stream_chunked =
+                    (data.2.len() > 100_000 || estimated_output_records > 500_000) && !cli.parquet;
+                if !stream_chunked && cli.parquet && estimated_output_records > 500_000 {
+                    eprintln!(
+                        "⚠️  Note: --parquet holds all {estimated_output_records} estimated records in memory (chunked streaming cannot produce parquet)."
+                    );
+                }
+                if stream_chunked {
                     if cli.verbose {
                         if estimated_output_records > data.2.len() {
                             println!("   📦 Large output expected ({} estimated records) - using chunked processing to prevent memory issues", estimated_output_records);
@@ -734,20 +755,15 @@ fn main() {
                 }
             }
 
-            #[cfg(feature = "parquet_out")]
-            let skip_text = cli.parquet;
-            #[cfg(not(feature = "parquet_out"))]
-            let skip_text = false;
-
-            if !skip_text {
-                println!(
-                    "💾 Writing MAF file{}...",
-                    if cli.compress { " (compressed)" } else { "" }
-                );
-                if let Err(e) = write_maf_file(&maf_output_file, &maf_records, cli.compress) {
-                    eprintln!("❌ Error writing MAF file: {e}");
-                    std::process::exit(1);
-                }
+            // ponytail: --parquet writes *in addition to* the text file, on both the MAF and
+            // the TSV path. Same contract everywhere; nothing to remember.
+            println!(
+                "💾 Writing MAF file{}...",
+                if cli.compress { " (compressed)" } else { "" }
+            );
+            if let Err(e) = write_maf_file(&maf_output_file, &maf_records, cli.compress) {
+                eprintln!("❌ Error writing MAF file: {e}");
+                std::process::exit(1);
             }
             let write_time = write_start.elapsed();
 

@@ -320,6 +320,23 @@ mod tests {
     }
 
     #[test]
+    fn test_count_multi_transcript_sites() {
+        let lines = vec![
+            // single CSQ entry
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;CSQ=G|missense_variant|MODERATE|BRAF".to_string(),
+            // two CSQ entries
+            "chr1\t200\t.\tC\tT\t40\tPASS\tCSQ=T|intron_variant||X,T|missense_variant||X".to_string(),
+            // two SnpEff ANN entries
+            "chr2\t300\t.\tG\tA\t50\tPASS\tANN=A|synonymous_variant||Y,A|stop_gained||Y".to_string(),
+            // comma in a different INFO field must not count
+            "chr3\t400\t.\tT\tC\t50\tPASS\tAF=0.1,0.2;CSQ=C|intron_variant||Z".to_string(),
+            // no annotation at all
+            "chr4\t500\t.\tT\tC\t50\tPASS\tDP=10".to_string(),
+        ];
+        assert_eq!(count_multi_transcript_sites(&lines), 2);
+    }
+
+    #[test]
     fn test_count_input_chromosomes() {
         let lines = vec![
             "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),

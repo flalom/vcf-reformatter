@@ -50,6 +50,11 @@ impl MafRecord {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Determine variant type and get proper MAF positions/alleles
         let variant_type = Self::determine_variant_type(&record.reference, &record.alternate);
+        // Kept character-for-character as vcf2maf.pl:769 writes it:
+        //   $inframe = ( abs( $ref_length - $var_length ) % 3 == 0 ? 1 : 0 );
+        // clippy would rewrite this as .is_multiple_of(3); that is semantically identical but
+        // breaks the line-for-line correspondence with the reference implementation.
+        #[allow(clippy::manual_is_multiple_of)]
         let inframe = record.reference.len().abs_diff(record.alternate.len()) % 3 == 0;
         let (start_pos, end_pos) = Self::calculate_maf_positions(
             record.position,

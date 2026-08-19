@@ -218,6 +218,10 @@ impl ReformattedVcfRecord {
         Ok(records)
     }
 }
+
+/// One flattened record per transcript, plus which annotation field they came from.
+type ParsedInfoField = (Vec<HashMap<String, String>>, AnnotationFieldType);
+
 /// Parse the INFO field of a VCF record, extracting and processing annotations
 ///
 /// This function separates annotation data (CSQ/ANN) from standard INFO fields,
@@ -241,7 +245,7 @@ pub fn parse_info_field(
     csq_field_names: &Option<Vec<String>>,
     ann_field_names: &Option<Vec<String>>,
     transcript_handling: TranscriptHandling,
-) -> std::result::Result<(Vec<HashMap<String, String>>, AnnotationFieldType), Box<dyn std::error::Error>> {
+) -> Result<ParsedInfoField, Box<dyn std::error::Error>> {
     if info.is_empty() {
         return Ok((vec![HashMap::new()], AnnotationFieldType::None));
     }
@@ -1061,7 +1065,7 @@ pub fn reformat_vcf_data_with_header_parallel_chunked(
         total_processed += chunk.len();
 
         // Progress logging every 100k lines
-        if total_processed % 100_000 == 0 {
+        if total_processed.is_multiple_of(100_000) {
             println!("   📊 Streamed {} lines so far...", total_processed);
         }
     }

@@ -3420,7 +3420,7 @@ mod parquet_tests {
 
         let file = std::fs::File::open(path).unwrap();
         let reader = SerializedFileReader::new(file).unwrap();
-        let schema = reader.metadata().file_metadata().schema_descr().clone();
+        let schema = reader.metadata().file_metadata().schema_descr();
         let parquet_columns: Vec<String> = schema.columns().iter().map(|c| c.name().to_string()).collect();
 
         assert_eq!(

@@ -23,7 +23,7 @@ pub fn write_tsv_as_parquet(
 
     let file = std::fs::File::create(path)?;
     let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
+        .set_compression(Compression::ZSTD(Default::default()))
         .build();
     let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
     writer.write(&batch)?;
@@ -123,7 +123,7 @@ pub fn write_maf_as_parquet(
 
     let file = std::fs::File::create(path)?;
     let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
+        .set_compression(Compression::ZSTD(Default::default()))
         .build();
     let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
     writer.write(&batch)?;
