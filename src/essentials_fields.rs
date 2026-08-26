@@ -114,7 +114,7 @@ impl MafRecord {
             reference_allele: ref_allele,
             tumor_seq_allele1,
             tumor_seq_allele2,
-            dbsnp_rs: record.id.clone().filter(|id| id != "."),
+            dbsnp_rs: Self::get_dbsnp_rs(&record.info_fields, record.id.as_deref()),
             dbsnp_val_status: None,
             tumor_sample_barcode: sample_barcode.to_string(),
             matched_norm_sample_barcode: None,
@@ -167,6 +167,28 @@ impl MafRecord {
 
     /// VEP's `EXON` and SnpEff's `Rank` are both formatted `<rank>/<total>` and are
     /// vcf2maf's source for the MAF `Exon_Number` column.
+    /// vcf2maf.pl:854-860 — dbSNP_RS comes from VEP's `Existing_variation`, keeping only real
+    /// rs IDs; a variant known only to COSMIC et al. leaves the column blank, and "novel" means
+    /// VEP looked it up and found nothing. SnpEff's ANN carries no equivalent field, so on that
+    /// path the VCF ID column is all there is.
+    fn get_dbsnp_rs(info_fields: &HashMap<String, String>, id: Option<&str>) -> Option<String> {
+        let Some(existing) = info_fields.get("CSQ_Existing_variation") else {
+            return id.filter(|id| *id != ".").map(str::to_string);
+        };
+        if existing.is_empty() || existing == "." {
+            return Some("novel".to_string());
+        }
+        // VEP joins co-located variants with "&"; vcf2maf.pl:784 rewrites those to "," first.
+        let rs_ids: Vec<&str> = existing
+            .split(['&', ','])
+            .filter(|t| {
+                t.strip_prefix("rs")
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .collect();
+        (!rs_ids.is_empty()).then(|| rs_ids.join(","))
+    }
+
     fn get_exon_number(info_fields: &HashMap<String, String>) -> Option<String> {
         Self::get_annotation_field(info_fields, &["CSQ_EXON", "ANN_Rank"])
     }
@@ -1360,5 +1382,69 @@ mod tests {
         for idx in [17, 23, 29, 42, 45] {
             assert_eq!(fields[idx], ".", "column {idx} should be '.'");
         }
+    }
+
+    fn dbsnp_from(id: Option<&str>, existing_variation: Option<&str>) -> Option<String> {
+        let mut info_fields = HashMap::new();
+        if let Some(ev) = existing_variation {
+            info_fields.insert("CSQ_Existing_variation".to_string(), ev.to_string());
+        }
+        let record = ReformattedVcfRecord {
+            chromosome: "chr1".to_string(),
+            position: 100,
+            id: id.map(|s| s.to_string()),
+            reference: "A".to_string(),
+            alternate: "G".to_string(),
+            quality: Some(60.0),
+            filter: "PASS".to_string(),
+            info_fields,
+            format_sample_data: None,
+            annotation_field_type: crate::reformat_vcf::AnnotationFieldType::None,
+        };
+        MafRecord::from_reformatted_record(&record, "test", "GRCh38", "sample")
+            .unwrap()
+            .dbsnp_rs
+    }
+
+    #[test]
+    fn test_dbsnp_rs_keeps_only_rs_ids_from_existing_variation() {
+        // Real CSQ value from B505_1_V.mutect2.filtered_VEP.ann.vcf.gz. VEP joins co-located
+        // variants with "&"; vcf2maf.pl:784 rewrites those to "," before filtering on /^rs\d+$/.
+        assert_eq!(
+            dbsnp_from(None, Some("rs992327&COSV57258734")),
+            Some("rs992327".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dbsnp_rs_joins_multiple_rs_ids_with_commas() {
+        // vcf2maf.pl:856 — join( ",", grep{m/^rs\d+$/} ... )
+        assert_eq!(
+            dbsnp_from(None, Some("rs123&COSV1&rs456")),
+            Some("rs123,rs456".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dbsnp_rs_blank_when_variant_known_only_outside_dbsnp() {
+        // vcf2maf.pl:855 — "If seen in a DB other than dbSNP, this field will remain blank"
+        assert_eq!(dbsnp_from(None, Some("COSV57258734")), None);
+    }
+
+    #[test]
+    fn test_dbsnp_rs_is_novel_when_vep_found_no_existing_variation() {
+        // vcf2maf.pl:858-860 — VEP looked and came back empty, which is a result, not missing data.
+        assert_eq!(dbsnp_from(None, Some(".")), Some("novel".to_string()));
+    }
+
+    #[test]
+    fn test_dbsnp_rs_falls_back_to_vcf_id_when_csq_absent() {
+        // SnpEff's ANN has no Existing_variation equivalent, so the ID column is all we have.
+        assert_eq!(dbsnp_from(Some("rs123"), None), Some("rs123".to_string()));
+    }
+
+    #[test]
+    fn test_dbsnp_rs_none_without_annotation_or_id() {
+        assert_eq!(dbsnp_from(None, None), None);
     }
 }
