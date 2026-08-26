@@ -2591,6 +2591,50 @@ fn test_stdin_input_gzip() {
 }
 
 #[test]
+fn test_mutation_status_and_sequence_source_flags() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t100\t.\tA\tG\t60\tPASS\tDP=50\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            temp_vcf.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
+            "-p",
+            "meta",
+            "--output-format",
+            "maf",
+            "--report",
+            "none",
+            "--sample-barcode",
+            "TUMOR",
+            "--mutation-status",
+            "Somatic",
+            "--sequence-source",
+            "WGS",
+        ])
+        .output()
+        .expect("Failed to execute vcf-reformatter");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let maf = std::fs::read_to_string(dir.path().join("meta_reformatted.maf")).unwrap();
+    let mut lines = maf.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let value = |name: &str| row[header.iter().position(|h| *h == name).unwrap()];
+
+    assert_eq!(value("Mutation_Status"), "Somatic");
+    assert_eq!(value("Sequence_Source"), "WGS");
+}
+
+#[test]
 fn test_multiallelic_warning_on_stderr() {
     use std::io::Write;
 

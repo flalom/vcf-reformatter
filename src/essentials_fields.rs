@@ -48,39 +48,36 @@ impl MafRecord {
         ncbi_build: &str,
         sample_barcode: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Determine variant type and get proper MAF positions/alleles
-        let variant_type = Self::determine_variant_type(&record.reference, &record.alternate);
+        // Everything positional is decided on the trimmed alleles, exactly as vcf2maf does.
+        let (pos, vcf_ref, vcf_alt) =
+            Self::trim_shared_prefix(record.position, &record.reference, &record.alternate);
+        let variant_type = Self::determine_variant_type(&vcf_ref, &vcf_alt);
         // Kept character-for-character as vcf2maf.pl:769 writes it:
         //   $inframe = ( abs( $ref_length - $var_length ) % 3 == 0 ? 1 : 0 );
         // clippy would rewrite this as .is_multiple_of(3); that is semantically identical but
         // breaks the line-for-line correspondence with the reference implementation.
         #[allow(clippy::manual_is_multiple_of)]
-        let inframe = record.reference.len().abs_diff(record.alternate.len()) % 3 == 0;
-        let (start_pos, end_pos) = Self::calculate_maf_positions(
-            record.position,
-            &record.reference,
-            &record.alternate,
-            &variant_type,
+        let inframe = vcf_ref.len().abs_diff(vcf_alt.len()) % 3 == 0;
+        let (start_pos, end_pos) = Self::calculate_maf_positions(pos, &vcf_ref);
+        let (ref_allele, tumor_seq_allele1, tumor_seq_allele2) = Self::get_maf_alleles(
+            &vcf_ref,
+            &vcf_alt,
+            Self::tumor_genotype(&record.format_sample_data).as_deref(),
         );
-        let (ref_allele, tumor_seq_allele1, tumor_seq_allele2) =
-            Self::get_maf_alleles(&record.reference, &record.alternate, &variant_type);
 
         let mut t_alt_count = Self::extract_tumor_depth(&record.info_fields);
-        let mut t_depth = Self::extract_total_depth(&record.info_fields);
         let mut t_ref_count = Self::extract_ref_depth(&record.info_fields);
+        let (sample_total, sample_ref, sample_alt) =
+            Self::extract_depth_from_sample_data(&record.format_sample_data);
 
-        if t_alt_count.is_none() || t_depth.is_none() || t_ref_count.is_none() {
-            let (sample_total, sample_ref, sample_alt) =
-                Self::extract_depth_from_sample_data(&record.format_sample_data);
-            if t_alt_count.is_none() {
-                t_alt_count = sample_alt;
-            }
-            if t_depth.is_none() {
-                t_depth = sample_total;
-            }
-            if t_ref_count.is_none() {
-                t_ref_count = sample_ref;
-            }
+        // t_depth is the depth in the tumor sample (vcf2maf.pl:936 reads the sample's FORMAT/DP),
+        // not INFO/DP, which counts every read the caller saw at the locus and runs higher.
+        let t_depth = sample_total.or_else(|| Self::extract_total_depth(&record.info_fields));
+        if t_alt_count.is_none() {
+            t_alt_count = sample_alt;
+        }
+        if t_ref_count.is_none() {
+            t_ref_count = sample_ref;
         }
 
         let vaf = match (t_alt_count, t_depth) {
@@ -105,7 +102,9 @@ impl MafRecord {
             chromosome: Self::normalize_chromosome(&record.chromosome),
             start_position: start_pos,
             end_position: end_pos,
-            strand: Self::get_strand(&record.info_fields),
+            // vcf2maf.pl:907 — per the MAF definition, only "+" is an accepted value here.
+            // VEP's transcript strand stays available in the TSV output's CSQ_STRAND column.
+            strand: "+".to_string(),
             variant_classification: Self::get_variant_classification(
                 &record.info_fields,
                 &variant_type,
@@ -120,8 +119,10 @@ impl MafRecord {
             tumor_sample_barcode: sample_barcode.to_string(),
             matched_norm_sample_barcode: None,
             validation_status: None,
-            mutation_status: "Somatic".to_string(),
-            sequence_source: "WXS".to_string(),
+            // Neither is derivable from a VCF; main.rs overwrites them when the user passes
+            // --mutation-status / --sequence-source.
+            mutation_status: ".".to_string(),
+            sequence_source: ".".to_string(),
             sequencer: Self::extract_sequencing_info(&record.info_fields),
             hgvsc: Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSc", "ANN_HGVS_c"])
                 .filter(|s| s != "."),
@@ -194,6 +195,22 @@ impl MafRecord {
         let mut maf_records = Vec::new();
 
         for (alt_index, alternate) in alternates.iter().enumerate() {
+            // The annotation we kept belongs to one specific allele. On a multiallelic line,
+            // carrying it onto the other ALTs would report a gene and consequence for an allele
+            // the annotator never described, so those rows go out unannotated instead.
+            let mut info_fields = record.info_fields.clone();
+            if alternates.len() > 1
+                && !Self::annotation_describes_allele(
+                    &info_fields,
+                    record.position,
+                    &record.reference,
+                    alternate,
+                    alt_index,
+                )
+            {
+                info_fields.retain(|k, _| !(k.starts_with("CSQ_") || k.starts_with("ANN_")));
+            }
+
             // Create a record for each alternate allele
             let single_alt_record = ReformattedVcfRecord {
                 chromosome: record.chromosome.clone(),
@@ -203,7 +220,7 @@ impl MafRecord {
                 alternate: alternate.to_string(),
                 quality: record.quality,
                 filter: record.filter.clone(),
-                info_fields: record.info_fields.clone(),
+                info_fields,
                 format_sample_data: record.format_sample_data.clone(),
                 annotation_field_type: record.annotation_field_type,
             };
@@ -215,6 +232,21 @@ impl MafRecord {
                 ncbi_build,
                 sample_barcode,
             )?;
+
+            // Tumor_Seq_Allele1 needs the sibling ALTs a single-ALT record no longer carries:
+            // a 1/2 genotype reports the *other* ALT (vcf2maf.pl:918-921).
+            if alternates.len() > 1 {
+                if let Some(genotype) = Self::tumor_genotype(&record.format_sample_data) {
+                    if let Some(allele1) = Self::genotype_allele1(
+                        &record.reference,
+                        &alternates,
+                        alt_index,
+                        &genotype,
+                    ) {
+                        maf_record.tumor_seq_allele1 = allele1;
+                    }
+                }
+            }
 
             // Adjust depth for specific allele if available
             if let Some(allele_depth) =
@@ -252,18 +284,6 @@ impl MafRecord {
 
         // Fallback to total tumor depth
         Self::extract_tumor_depth(info_fields)
-    }
-
-    fn get_strand(info_fields: &HashMap<String, String>) -> String {
-        if let Some(strand) = Self::get_annotation_field(info_fields, &["CSQ_STRAND", "ANN_Strand"]) {
-            match strand.as_str() {
-                "1" | "+" => "+".to_string(),
-                "-1" | "-" => "-".to_string(),
-                _ => "+".to_string(),
-            }
-        } else {
-            "+".to_string() // MAF spec requires + or -, default to +
-        }
     }
 
     // Extract Entrez Gene ID from HGNC if available
@@ -370,75 +390,138 @@ impl MafRecord {
         None
     }
 
-    fn calculate_maf_positions(
+    /// Does the annotation we kept actually describe this ALT?
+    ///
+    /// VEP's `ALLELE_NUM` settles it outright when present — that is the key vcf2maf.pl:867
+    /// uses — but VEP only emits it under `--allele_number`, which plenty of real files were
+    /// not annotated with. Without it, fall back to the allele name in the first CSQ/ANN
+    /// subfield, which VEP writes in any of three forms: the ALT verbatim, the ALT with its
+    /// anchor base removed, or the fully prefix-trimmed allele ("-" when that leaves nothing).
+    /// No allele named at all — unannotated input — counts as a match, so such records are
+    /// left exactly as they were.
+    fn annotation_describes_allele(
+        info_fields: &HashMap<String, String>,
         position: u64,
         reference: &str,
         alternate: &str,
-        variant_type: &str,
-    ) -> (u64, u64) {
-        // VCF indels have a shared anchor base prefix. MAF positions refer to
-        // the actual inserted/deleted bases, not the anchor.
-        // Note: VCF alleles are ASCII (A/C/G/T), so chars().count() == byte length.
-        let shared_prefix_len = reference
+        alt_index: usize,
+    ) -> bool {
+        if let Some(allele_num) = Self::get_annotation_field(info_fields, &["CSQ_ALLELE_NUM"]) {
+            return allele_num.parse::<usize>() == Ok(alt_index + 1);
+        }
+        let Some(annotated) = Self::get_annotation_field(info_fields, &["CSQ_Allele", "ANN_Allele"])
+        else {
+            return true;
+        };
+        let (_, _, trimmed) = Self::trim_shared_prefix(position, reference, alternate);
+        let dash = |s: &str| if s.is_empty() { "-" } else { s }.to_string();
+        [
+            alternate.to_string(),
+            dash(&trimmed),
+            dash(&alternate[1.min(alternate.len())..]),
+        ]
+        .contains(&annotated)
+    }
+
+    /// Strip the bases REF and ALT share at the front, moving the position along with them.
+    /// vcf2maf.pl:749-752 does this for *every* variant type, not just indels — so an
+    /// un-normalized `CCCCA>CCCCC` is reported as the A>C SNP it actually is.
+    /// Note: VCF alleles are ASCII (A/C/G/T), so char count == byte length.
+    fn shared_prefix_len(reference: &str, alternate: &str) -> usize {
+        // vcf2maf's loop is guarded on `$ref ne $var`, so identical alleles are left alone.
+        if reference == alternate {
+            return 0;
+        }
+        reference
             .chars()
             .zip(alternate.chars())
             .take_while(|(r, a)| r == a)
-            .count() as u64;
+            .count()
+    }
 
-        match variant_type {
-            "INS" => {
-                // Insertion: start = last shared base, end = start + 1
-                // Guard against malformed VCF with no anchor base (shared_prefix_len == 0)
-                let start = if shared_prefix_len > 0 {
-                    position + shared_prefix_len - 1
-                } else {
-                    position
-                };
-                (start, start + 1)
-            }
-            "DEL" => {
-                // Deletion: start = first deleted base, end = last deleted base
-                let deleted_len = reference.len() as u64 - shared_prefix_len;
-                if deleted_len == 0 {
-                    return (position, position);
-                }
-                let start = position + shared_prefix_len;
-                let end = start + deleted_len - 1;
-                (start, end.max(start))
-            }
-            _ => (position, position),
+    fn trim_shared_prefix(position: u64, reference: &str, alternate: &str) -> (u64, String, String) {
+        let shared = Self::shared_prefix_len(reference, alternate);
+        (
+            position + shared as u64,
+            reference[shared..].to_string(),
+            alternate[shared..].to_string(),
+        )
+    }
+
+    /// Takes the *trimmed* REF. An empty REF is an insertion, which MAF anchors between the
+    /// two flanking bases; everything else spans the reference bases it replaces or deletes.
+    fn calculate_maf_positions(position: u64, reference: &str) -> (u64, u64) {
+        if reference.is_empty() {
+            (position.saturating_sub(1), position)
+        } else {
+            (position, position + reference.len() as u64 - 1)
         }
     }
 
+    /// Takes the *trimmed* alleles. MAF writes a bare "-" where a trimmed allele is empty.
+    ///
+    /// vcf2maf.pl:913-921 picks Tumor_Seq_Allele1 as the first genotype allele that isn't the
+    /// variant, so a homozygous-alt call reports the ALT twice; with no usable GT it assumes a
+    /// ref/var heterozygote. A `1/2` call needs the sibling ALTs, which only
+    /// `from_reformatted_record_multi` still has — it patches the result afterwards.
     fn get_maf_alleles(
         reference: &str,
         alternate: &str,
-        variant_type: &str,
+        tumor_genotype: Option<&str>,
     ) -> (String, String, String) {
-        // VCF indels include a shared anchor base that MAF strips out.
-        // E.g., VCF ref=A alt=ATCG → MAF ref="-" alt="TCG"
-        //       VCF ref=ATCG alt=A → MAF ref="TCG" alt="-"
-        let shared_prefix_len = reference
-            .chars()
-            .zip(alternate.chars())
-            .take_while(|(r, a)| r == a)
-            .count();
+        let dash = |s: &str| if s.is_empty() { "-" } else { s }.to_string();
+        let hom_alt = tumor_genotype.is_some_and(|gt| {
+            let mut indices = gt.split(['/', '|']).peekable();
+            indices.peek().is_some()
+                && indices.all(|i| matches!(i.parse::<u32>(), Ok(index) if index > 0))
+        });
+        let allele1 = if hom_alt { alternate } else { reference };
+        (dash(reference), dash(allele1), dash(alternate))
+    }
 
-        match variant_type {
-            "INS" => {
-                let inserted = &alternate[shared_prefix_len..];
-                ("-".to_string(), "-".to_string(), inserted.to_string())
-            }
-            "DEL" => {
-                let deleted = &reference[shared_prefix_len..];
-                (deleted.to_string(), deleted.to_string(), "-".to_string())
-            }
-            _ => (
-                reference.to_string(),
-                reference.to_string(),
-                alternate.to_string(),
-            ),
+    /// Tumor_Seq_Allele1 for one ALT of a multiallelic line, ported from vcf2maf.pl:918-921:
+    /// the first GT allele that isn't this row's variant, so `1/2` reports the *sibling* ALT.
+    /// Alleles are trimmed by the prefix this row's REF/ALT share (vcf2maf.pl:749-752 trims the
+    /// whole allele list together), and a sibling shorter than that trim collapses to "-", the
+    /// same as Perl's `substr` past the end of the string.
+    fn genotype_allele1(
+        reference: &str,
+        alternates: &[&str],
+        alt_index: usize,
+        genotype: &str,
+    ) -> Option<String> {
+        let variant = alternates.get(alt_index)?;
+        let shared = Self::shared_prefix_len(reference, variant);
+        let trim = |allele: &str| match allele.get(shared..) {
+            Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
+            _ => "-".to_string(),
+        };
+        let allele_at = |index: usize| match index.checked_sub(1) {
+            None => Some(trim(reference)),
+            Some(alt) => alternates.get(alt).map(|a| trim(a)),
+        };
+
+        let mut indices = genotype.split(['/', '|']).map(|i| i.parse::<usize>().ok());
+        let first = indices.next().flatten()?;
+        // "If GT was monoploid, then $idx2 will be undefined, and we should set it equal to $idx1"
+        let second = indices.next().flatten().unwrap_or(first);
+
+        let allele1 = allele_at(first)?;
+        if allele1 != trim(variant) {
+            Some(allele1)
+        } else {
+            allele_at(second)
         }
+    }
+
+    /// The tumor sample's GT, taken from the first sample that declares one — the same
+    /// "first sample is the tumor" assumption `extract_depth_from_sample_data` makes.
+    fn tumor_genotype(format_sample_data: &Option<ParsedFormatSample>) -> Option<String> {
+        format_sample_data
+            .as_ref()?
+            .samples
+            .iter()
+            .find_map(|sample| sample.format_fields.get("GT").cloned())
     }
 
     fn determine_variant_type(reference: &str, alternate: &str) -> String {
@@ -709,7 +792,8 @@ impl MafRecord {
         match impact.as_deref().map(|s| s.to_uppercase()).as_deref() {
             Some("HIGH") | Some("MODERATE") => "Missense_Mutation".to_string(),
             Some("LOW") | Some("MODIFIER") => "Silent".to_string(),
-            _ => "Unknown".to_string(),
+            // vcf2maf.pl:1050 — "Targeted_Region" when there is no effect to go on at all.
+            _ => "Targeted_Region".to_string(),
         }
     }
 
@@ -810,6 +894,195 @@ impl MafRecord {
 mod tests {
     use super::*;
 
+    fn maf_from(position: u64, reference: &str, alternate: &str) -> MafRecord {
+        let record = ReformattedVcfRecord {
+            chromosome: "chr1".to_string(),
+            position,
+            id: None,
+            reference: reference.to_string(),
+            alternate: alternate.to_string(),
+            quality: Some(60.0),
+            filter: "PASS".to_string(),
+            info_fields: HashMap::new(),
+            format_sample_data: None,
+            annotation_field_type: crate::reformat_vcf::AnnotationFieldType::None,
+        };
+        MafRecord::from_reformatted_record(&record, "test", "GRCh38", "sample").unwrap()
+    }
+
+    #[test]
+    fn test_dnp_end_position_spans_both_bases() {
+        // vcf2maf.pl:755 — ( $start, $stop ) = ( $pos, $pos + $var_length - 1 )
+        let maf = maf_from(100, "AC", "GT");
+        assert_eq!(maf.variant_type, "DNP");
+        assert_eq!((maf.start_position, maf.end_position), (100, 101));
+    }
+
+    #[test]
+    fn test_onp_end_position_spans_all_bases() {
+        let maf = maf_from(100, "ACGT", "TGCA");
+        assert_eq!(maf.variant_type, "ONP");
+        assert_eq!((maf.start_position, maf.end_position), (100, 103));
+    }
+
+    #[test]
+    fn test_untrimmed_equal_length_alleles_reduce_to_snp() {
+        // Real un-normalized freebayes site: chr1:8324505 CCCCA>CCCCC is an A>C SNP at 8324509.
+        // vcf2maf.pl:749-752 strips shared leading bases for every variant type, not just indels.
+        let maf = maf_from(8324505, "CCCCA", "CCCCC");
+        assert_eq!(maf.variant_type, "SNP");
+        assert_eq!((maf.start_position, maf.end_position), (8324509, 8324509));
+        assert_eq!(maf.reference_allele, "A");
+        assert_eq!(maf.tumor_seq_allele2, "C");
+    }
+
+    #[test]
+    fn test_insertion_positions_and_alleles_unchanged() {
+        let maf = maf_from(100, "A", "ATCG");
+        assert_eq!(maf.variant_type, "INS");
+        assert_eq!((maf.start_position, maf.end_position), (100, 101));
+        assert_eq!(maf.reference_allele, "-");
+        assert_eq!(maf.tumor_seq_allele2, "TCG");
+    }
+
+    #[test]
+    fn test_deletion_positions_and_alleles_unchanged() {
+        let maf = maf_from(100, "ATCG", "A");
+        assert_eq!(maf.variant_type, "DEL");
+        assert_eq!((maf.start_position, maf.end_position), (101, 103));
+        assert_eq!(maf.reference_allele, "TCG");
+        assert_eq!(maf.tumor_seq_allele2, "-");
+    }
+
+    fn annotated_record(
+        position: u64,
+        reference: &str,
+        alternate: &str,
+        csq_allele: &str,
+    ) -> ReformattedVcfRecord {
+        let mut info_fields = HashMap::new();
+        info_fields.insert("CSQ_Allele".to_string(), csq_allele.to_string());
+        info_fields.insert("CSQ_SYMBOL".to_string(), "SLC45A1".to_string());
+        info_fields.insert(
+            "CSQ_Consequence".to_string(),
+            "missense_variant".to_string(),
+        );
+        ReformattedVcfRecord {
+            chromosome: "chr1".to_string(),
+            position,
+            id: None,
+            reference: reference.to_string(),
+            alternate: alternate.to_string(),
+            quality: Some(60.0),
+            filter: "PASS".to_string(),
+            info_fields,
+            format_sample_data: None,
+            annotation_field_type: crate::reformat_vcf::AnnotationFieldType::Csq,
+        }
+    }
+
+    #[test]
+    fn test_strand_is_always_plus() {
+        // vcf2maf.pl:907 — "Per MAF definition, only the positive strand is an accepted value".
+        // The MAF Strand column is genomic; VEP's transcript strand does not belong in it.
+        let mut record = annotated_record(100, "A", "G", "G");
+        record
+            .info_fields
+            .insert("CSQ_STRAND".to_string(), "-1".to_string());
+        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(maf.strand, "+");
+    }
+
+    #[test]
+    fn test_unasserted_metadata_columns_default_to_dot() {
+        // Nothing in a VCF says the calls are somatic or that the library was an exome.
+        let maf = maf_from(100, "A", "G");
+        assert_eq!(maf.mutation_status, ".");
+        assert_eq!(maf.sequence_source, ".");
+    }
+
+    #[test]
+    fn test_unannotated_record_uses_vcf2maf_fallback_classification() {
+        // vcf2maf.pl:1050 — return "Targeted_Region" if( not defined $effect or not $effect );
+        // "Unknown" is not a value the MAF spec allows in this column.
+        let maf = maf_from(100, "A", "G");
+        assert_eq!(maf.variant_classification, "Targeted_Region");
+    }
+
+    #[test]
+    fn test_multiallelic_annotation_stays_on_its_own_allele() {
+        // VEP annotated GCCCC only; CCCCC must not inherit its gene and consequence.
+        let record = annotated_record(8324505, "CCCCA", "GCCCC,CCCCC", "GCCCC");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows.len(), 2, "one row per ALT");
+        assert_eq!(rows[0].hugo_symbol, "SLC45A1");
+        assert_eq!(rows[0].variant_classification, "Missense_Mutation");
+        assert_eq!(rows[1].hugo_symbol, "Unknown");
+        assert_ne!(rows[1].variant_classification, "Missense_Mutation");
+    }
+
+    #[test]
+    fn test_multiallelic_annotation_kept_when_it_names_the_second_allele() {
+        let record = annotated_record(8324505, "CCCCA", "GCCCC,CCCCC", "CCCCC");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows[0].hugo_symbol, "Unknown");
+        assert_eq!(rows[1].hugo_symbol, "SLC45A1");
+    }
+
+    #[test]
+    fn test_multiallelic_matches_vep_minimal_indel_allele() {
+        // VEP reports deletions as "-": REF=AT ALT=A is a deletion of T.
+        let record = annotated_record(100, "AT", "A,ATT", "-");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows[0].hugo_symbol, "SLC45A1", "deletion allele is the annotated one");
+        assert_eq!(rows[1].hugo_symbol, "Unknown");
+    }
+
+    #[test]
+    fn test_multiallelic_matches_vep_anchor_stripped_insertion_allele() {
+        // Real site: REF=TGGAGGA ALT=T,TGGAGGAGGA — VEP names the insertion allele
+        // "GGAGGAGGA", i.e. the ALT with only its anchor base removed.
+        let record = annotated_record(73385903, "TGGAGGA", "T,TGGAGGAGGA", "GGAGGAGGA");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows[0].hugo_symbol, "Unknown", "deletion allele was not annotated");
+        assert_eq!(rows[1].hugo_symbol, "SLC45A1");
+    }
+
+    #[test]
+    fn test_allele_num_decides_when_vep_provides_it() {
+        // vcf2maf.pl:867 skips effects whose ALLELE_NUM is not this ALT's 1-based index.
+        // Present only when VEP ran with --allele_number, and authoritative when it is.
+        let mut record = annotated_record(100, "A", "G,T", "does_not_match");
+        record
+            .info_fields
+            .insert("CSQ_ALLELE_NUM".to_string(), "2".to_string());
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows[0].hugo_symbol, "Unknown");
+        assert_eq!(rows[1].hugo_symbol, "SLC45A1");
+    }
+
+    #[test]
+    fn test_single_allele_annotation_is_never_stripped() {
+        // Guard: allele filtering must not touch the ordinary one-ALT case.
+        let record = annotated_record(100, "A", "G", "does_not_match");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hugo_symbol, "SLC45A1");
+    }
+
     #[test]
     fn test_hgvsp_to_short_converts_three_letter_codes() {
         assert_eq!(MafRecord::hgvsp_to_short("p.Val600Glu"), "p.V600E");
@@ -880,6 +1153,129 @@ mod tests {
     fn test_extract_ref_depth_none_when_absent() {
         let info = HashMap::new();
         assert_eq!(MafRecord::extract_ref_depth(&info), None);
+    }
+
+    fn record_with_genotype(reference: &str, alternate: &str, gt: &str) -> ReformattedVcfRecord {
+        use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
+        let mut format_fields = HashMap::new();
+        format_fields.insert("GT".to_string(), gt.to_string());
+        let mut record = annotated_record(100, reference, alternate, alternate);
+        record.format_sample_data = Some(ParsedFormatSample {
+            format_keys: vec!["GT".to_string()],
+            samples: vec![ParsedSample {
+                sample_name: "TUMOR".to_string(),
+                format_fields,
+            }],
+        });
+        record
+    }
+
+    #[test]
+    fn test_tumor_seq_allele1_is_the_alt_when_genotype_is_hom_alt() {
+        // vcf2maf.pl:913-921 — Tumor_Seq_Allele1 is the first GT allele that isn't the variant,
+        // so a 1/1 call reports the ALT twice rather than pretending the site is heterozygous.
+        let record = record_with_genotype("T", "C", "1/1");
+        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(maf.reference_allele, "T");
+        assert_eq!(maf.tumor_seq_allele1, "C");
+        assert_eq!(maf.tumor_seq_allele2, "C");
+    }
+
+    #[test]
+    fn test_tumor_seq_allele1_hom_alt_deletion_uses_the_dash_form() {
+        let record = record_with_genotype("ATCG", "A", "1|1");
+        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(maf.reference_allele, "TCG");
+        assert_eq!(maf.tumor_seq_allele1, "-");
+    }
+
+    #[test]
+    fn test_tumor_seq_allele1_stays_reference_for_het_and_missing_genotypes() {
+        // Guard: only hom-alt changes. vcf2maf assumes ref/var het when GT is absent or "./.".
+        for gt in ["0/1", "0|1", "./.", "."] {
+            let record = record_with_genotype("T", "C", gt);
+            let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+            assert_eq!(maf.tumor_seq_allele1, "T", "GT was {gt}");
+        }
+        let maf = maf_from(100, "T", "C");
+        assert_eq!(maf.tumor_seq_allele1, "T", "no sample columns at all");
+    }
+
+    #[test]
+    fn test_multiallelic_genotype_reports_the_sibling_allele() {
+        // Real site: chr1:240207640 REF=CT ALT=TC,CC GT=1/2. vcf2maf.pl:921 takes the first GT
+        // allele that isn't this row's variant, so the TC row reports CC and vice versa.
+        let record = record_with_genotype("CT", "TC,CC", "1/2");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows[0].tumor_seq_allele2, "TC");
+        assert_eq!(rows[0].tumor_seq_allele1, "CC");
+        // The CC row trims the C it shares with REF=CT, and its siblings trim with it.
+        assert_eq!(rows[1].tumor_seq_allele2, "C");
+        assert_eq!(rows[1].tumor_seq_allele1, "C");
+    }
+
+    #[test]
+    fn test_multiallelic_genotype_with_reference_allele_reports_reference() {
+        let record = record_with_genotype("CT", "TC,CC", "0/2");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows[1].tumor_seq_allele2, "C");
+        assert_eq!(rows[1].tumor_seq_allele1, "T", "GT names the reference allele");
+    }
+
+    #[test]
+    fn test_multiallelic_sibling_shorter_than_the_trim_becomes_dash() {
+        // REF=TGGAGGA ALT=T,TGGAGGAGGA GT=1/2: for the insertion row the trim eats 7 bases, more
+        // than the sibling deletion allele has, and vcf2maf's substr loop leaves it as "-".
+        let record = record_with_genotype("TGGAGGA", "T,TGGAGGAGGA", "1/2");
+        let rows =
+            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+
+        assert_eq!(rows[1].tumor_seq_allele2, "GGA", "insertion row");
+        assert_eq!(rows[1].tumor_seq_allele1, "-");
+    }
+
+    #[test]
+    fn test_t_depth_prefers_the_sample_over_info_dp() {
+        // vcf2maf.pl:936 takes t_depth from the tumor sample's FORMAT/DP. INFO/DP counts reads
+        // the caller saw at the locus, which on mutect2 output is consistently higher.
+        use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
+        let mut format_fields = HashMap::new();
+        format_fields.insert("DP".to_string(), "90".to_string());
+        format_fields.insert("AD".to_string(), "60,30".to_string());
+
+        let mut record = annotated_record(100, "A", "G", "G");
+        record
+            .info_fields
+            .insert("INFO_DP".to_string(), "100".to_string());
+        record.format_sample_data = Some(ParsedFormatSample {
+            format_keys: vec!["DP".to_string(), "AD".to_string()],
+            samples: vec![ParsedSample {
+                sample_name: "TUMOR".to_string(),
+                format_fields,
+            }],
+        });
+
+        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        assert_eq!(maf.t_depth, Some(90));
+        assert_eq!(maf.t_ref_count, Some(60));
+        assert_eq!(maf.t_alt_count, Some(30));
+    }
+
+    #[test]
+    fn test_t_depth_falls_back_to_info_dp_without_sample_columns() {
+        let mut record = annotated_record(100, "A", "G", "G");
+        record
+            .info_fields
+            .insert("INFO_DP".to_string(), "100".to_string());
+
+        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        assert_eq!(maf.t_depth, Some(100));
     }
 
     #[test]

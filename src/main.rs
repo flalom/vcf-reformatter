@@ -160,6 +160,16 @@ struct Cli {
     #[arg(long)]
     sample_barcode: Option<String>,
 
+    /// Mutation_Status for MAF output, e.g. Somatic or Germline. A VCF does not state this,
+    /// so the column is left as "." unless you set it.
+    #[arg(long)]
+    mutation_status: Option<String>,
+
+    /// Sequence_Source for MAF output, e.g. WXS or WGS. A VCF does not state this, so the
+    /// column is left as "." unless you set it.
+    #[arg(long)]
+    sequence_source: Option<String>,
+
     /// Report format: html (default), txt, or none (no report generated)
     #[arg(long, value_enum, default_value_t = ReportFormatCli::Html)]
     report: ReportFormatCli,
@@ -717,13 +727,24 @@ fn main() {
             };
 
             // Convert to MAF records using the fixed function
-            let (maf_records, reformatted_records) = match convert_to_maf_records(&params) {
+            let (mut maf_records, reformatted_records) = match convert_to_maf_records(&params) {
                 Ok(result) => result,
                 Err(e) => {
                     eprintln!("❌ Error converting to MAF: {e}");
                     std::process::exit(1);
                 }
             };
+
+            // Study metadata no VCF carries; "." unless the user states it.
+            for record in &mut maf_records {
+                if let Some(status) = &cli.mutation_status {
+                    record.mutation_status = status.clone();
+                }
+                if let Some(source) = &cli.sequence_source {
+                    record.sequence_source = source.clone();
+                }
+            }
+            let maf_records = maf_records;
 
             let process_time = process_start.elapsed();
             let variants_per_sec = data.2.len() as f64 / process_time.as_secs_f64();
