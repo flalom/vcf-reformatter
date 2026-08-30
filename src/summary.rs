@@ -73,9 +73,10 @@ pub fn count_multiallelic_sites(data_lines: &[String]) -> usize {
 }
 
 /// Count VCF data lines whose CSQ (VEP) or ANN (SnpEff) annotation field lists more than one
-/// comma-separated transcript entry. Used to warn that `first`-mode transcript handling (which
-/// keeps literal CSQ/ANN order, not severity order) may pick an arbitrary non-most-severe
-/// transcript for such sites — VEP only guarantees one entry per variant when run with `--pick`.
+/// comma-separated transcript entry. These are the only sites where the transcript-handling
+/// mode changes what gets reported: `first` takes the annotator's own first entry without
+/// re-ranking it, so the consequence it reports need not be the most damaging one present.
+/// VEP guarantees a single entry per variant only when run with `--pick`.
 pub fn count_multi_transcript_sites(data_lines: &[String]) -> usize {
     data_lines
         .iter()

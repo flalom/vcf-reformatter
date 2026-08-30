@@ -121,6 +121,14 @@ struct Cli {
     annotation_type: AnnotationTypeCli,
 
     /// Transcript handling mode
+    ///
+    /// 'first' (the default) keeps whichever annotation the annotator listed first, without
+    /// re-ranking it. On VEP output run with --pick, and on callers that emit a single
+    /// transcript per variant, that is the annotator's own selection and there is nothing to
+    /// choose between. Where a variant carries several transcript annotations it is literal
+    /// list order, not severity order, so the consequence reported need not be the most
+    /// damaging one present. Use 'most-severe' to rank the annotations by consequence
+    /// severity instead, or 'split' to keep every transcript as its own row.
     #[arg(short = 't', long = "transcript-handling", value_enum, default_value_t = TranscriptHandlingCli::FirstOnly)]
     transcript_handling: TranscriptHandlingCli,
 
@@ -170,6 +178,20 @@ struct Cli {
     #[arg(long)]
     sequence_source: Option<String>,
 
+    /// Name of the tumor sample, exactly as it appears in the VCF's #CHROM line.
+    ///
+    /// The t_depth / t_ref_count / t_alt_count columns are read from this sample. Without it
+    /// the first sample declaring DP is used, which is a guess — set this on any multi-sample
+    /// VCF, where guessing can report the wrong sample's read counts.
+    #[arg(long)]
+    tumor_id: Option<String>,
+
+    /// Name of the matched normal sample, exactly as it appears in the VCF's #CHROM line.
+    /// Populates the n_depth / n_ref_count / n_alt_count and Matched_Norm_Sample_Barcode
+    /// columns, which are otherwise left empty.
+    #[arg(long)]
+    normal_id: Option<String>,
+
     /// Report format: html (default), txt, or none (no report generated)
     #[arg(long, value_enum, default_value_t = ReportFormatCli::Html)]
     report: ReportFormatCli,
@@ -197,7 +219,7 @@ enum TranscriptHandlingCli {
     /// Extract only the most severe consequence for each variant
     #[value(name = "most-severe")]
     MostSevere,
-    /// Keep first transcript only (fastest)
+    /// Keep the annotation the annotator listed first, unranked (default, fastest)
     #[value(name = "first")]
     FirstOnly,
     /// Split every transcript into separate rows
@@ -440,10 +462,11 @@ fn main() {
         let multi_transcript_count = summary::count_multi_transcript_sites(&data.2);
         if multi_transcript_count > 0 {
             eprintln!(
-                "⚠️  Warning: {multi_transcript_count} site(s) annotated against more than one transcript, but -t first is in use."
+                "ℹ️  Note: {multi_transcript_count} site(s) carry more than one transcript annotation; -t first is in use."
             );
-            eprintln!("   'first' keeps literal CSQ/ANN order, which is not severity order, so the reported");
-            eprintln!("   consequence may not be the most severe one. Use -t most-severe, or re-run VEP with --pick.");
+            eprintln!("   'first' reports the annotation listed first by the annotator, without re-ranking it,");
+            eprintln!("   so at those sites the consequence shown need not be the most damaging one present.");
+            eprintln!("   -t most-severe ranks by consequence severity; -t split keeps every transcript.");
         }
     }
 
@@ -721,6 +744,8 @@ fn main() {
                 center: &maf_config.center,
                 ncbi_build: &maf_config.ncbi_build,
                 sample_barcode: &maf_config.sample_barcode,
+                tumor_id: cli.tumor_id.as_deref(),
+                normal_id: cli.normal_id.as_deref(),
                 transcript_handling,
                 verbose: cli.verbose,
                 use_parallel,
@@ -1092,6 +1117,8 @@ struct MafConversionParams<'a> {
     center: &'a str,
     ncbi_build: &'a str,
     sample_barcode: &'a str,
+    tumor_id: Option<&'a str>,
+    normal_id: Option<&'a str>,
     transcript_handling: TranscriptHandling,
     verbose: bool,
     use_parallel: bool,
@@ -1141,11 +1168,13 @@ fn convert_to_maf_records(
         .1 // Access the records part of the tuple (headers, records)
         .iter()
         .flat_map(|record| {
-            match MafRecord::from_reformatted_record_multi(
+            match MafRecord::from_reformatted_record_multi_for_samples(
                 record,
                 params.center,
                 params.ncbi_build,
                 params.sample_barcode,
+                params.tumor_id,
+                params.normal_id,
             ) {
                 Ok(records) => records.into_iter().map(Ok).collect::<Vec<_>>(),
                 Err(e) => vec![Err(e)],

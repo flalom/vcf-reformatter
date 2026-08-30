@@ -92,7 +92,7 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 |-----------------------------------------|--------------------------------------------------|------------------------------------------------------|
 | 🧬 **VEP/SnpEff Annotation Parsing**    | Intelligent handling of CSQ/ANN annotations with correct field mapping for both | No more manual parsing of complex VEP/SnpEff output  |
 | 👀 **Automatic Annotation Recognition** | Automatic detection of CSQ/ANN annotations       | Saving even more time now for both VEP and SnpEff    |
-| 🔀 **Smart Transcript Handling**        | Most severe, first only, or split transcripts    | Choose the analysis approach that fits your needs    |
+| 🔀 **Smart Transcript Handling**        | Annotator's first entry, most severe, or split    | Choose the analysis approach that fits your needs    |
 | 🚀 **Parallel Processing**              | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
 | 📁 **Native Compression**               | Direct `.vcf.gz` reading & gzip output           | Seamless workflow with compressed/uncompressed files |
 | 🎯 **Production Ready**                 | Comprehensive error handling & logging           | Reliable for automated pipelines                     |
@@ -225,6 +225,9 @@ Options:
   -t, --transcript-handling <MODE>  How to handle multiple transcripts
                                    [default: first]
                                    [values: most-severe, first, split]
+                                   first: the annotator's own first entry, unranked
+                                   most-severe: ranked by consequence severity
+                                   split: one row per transcript
   -a, --annotation-type <N>        Which annotations to parse VEP/SnpEff
                                    [default: auto]
                                    [values: snpeff, vep, auto]
@@ -255,12 +258,24 @@ vcf-reformatter input.vcf.gz -t most-severe --output-format maf
 Selects the transcript with the most severe consequence (stop_gained > missense_variant > synonymous, etc.)
 
 ### ⚡ First Only (`--transcript-handling first`) *[Default]*
-**Best for:** Quick analysis, performance-critical workflows
+**Best for:** Annotator-picked input, reproducibility, performance-critical workflows
 ```shell script
 vcf-reformatter input.vcf.gz  # Uses first transcript by default
 ```
 
-Processes only the first transcript annotation (fastest option)
+Keeps whichever annotation the annotator listed first, without re-ranking it.
+
+When your VCF carries **one transcript annotation per variant** — VEP run with `--pick`, or a
+caller that annotates a single transcript, which is what many Mutect2 pipelines produce — that
+entry *is* the annotator's own selection, and `first` reports exactly what the annotator decided.
+This is why it is the default: it passes the upstream choice through unchanged, and the same input
+always gives the same output.
+
+When a variant carries **several transcript annotations**, `first` takes literal list order, which
+is not severity order. The consequence reported is then the first one listed, which need not be the
+most damaging one present — expected behaviour, not an error. vcf-reformatter prints a note on
+stderr when it sees such sites so the choice is never silent. Use `-t most-severe` if you want the
+annotations ranked by consequence severity, or `-t split` to keep every transcript.
 
 ### 📊 Split All (`--transcript-handling split`)
 **Best for:** Comprehensive analysis, transcript-level studies

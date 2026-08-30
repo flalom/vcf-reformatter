@@ -33,6 +33,9 @@ pub struct MafRecord {
     pub t_depth: Option<u32>,      // was `total_depth` — INFO DP, unchanged extraction
     pub t_ref_count: Option<u32>,  // new — INFO RO / sample AD[0]
     pub t_alt_count: Option<u32>,  // was `depth` — INFO AO / sample AD[1], unchanged extraction
+    pub n_depth: Option<u32>,      // matched normal, from --normal-id's FORMAT/DP
+    pub n_ref_count: Option<u32>,  // matched normal, from --normal-id's AD[0]
+    pub n_alt_count: Option<u32>,  // matched normal, from --normal-id's AD[1]
     // Trailing custom columns (this tool's own additions, not part of vcf2maf's core 46):
     pub filter_status: String,
     pub qual: Option<f64>,
@@ -42,11 +45,28 @@ pub struct MafRecord {
 
 impl MafRecord {
     /// Convert from ReformattedVcfRecord to MafRecord
+    // ponytail: unused by the binary since sample selection landed; the lib's tests are the callers.
+    #[allow(dead_code)]
     pub fn from_reformatted_record(
         record: &ReformattedVcfRecord,
         center: &str,
         ncbi_build: &str,
         sample_barcode: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_reformatted_record_for_samples(record, center, ncbi_build, sample_barcode, None, None)
+    }
+
+    /// As `from_reformatted_record`, but reading the depth columns from explicitly named
+    /// samples. `tumor` is the sample the t_* columns describe; `normal` populates the
+    /// matched-normal columns. Passing `None` for either keeps the historical behaviour of
+    /// using the first sample that declares `DP`.
+    pub fn from_reformatted_record_for_samples(
+        record: &ReformattedVcfRecord,
+        center: &str,
+        ncbi_build: &str,
+        sample_barcode: &str,
+        tumor: Option<&str>,
+        normal: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Everything positional is decided on the trimmed alleles, exactly as vcf2maf does.
         let (pos, vcf_ref, vcf_alt) =
@@ -62,32 +82,55 @@ impl MafRecord {
         let (ref_allele, tumor_seq_allele1, tumor_seq_allele2) = Self::get_maf_alleles(
             &vcf_ref,
             &vcf_alt,
-            Self::tumor_genotype(&record.format_sample_data).as_deref(),
+            Self::tumor_genotype(&record.format_sample_data, tumor).as_deref(),
         );
 
-        let mut t_alt_count = Self::extract_tumor_depth(&record.info_fields);
-        let mut t_ref_count = Self::extract_ref_depth(&record.info_fields);
+        // All three tumor counts must describe the SAME reads. They previously did not:
+        // t_depth came from the sample's FORMAT/DP (one sample) while t_ref_count/t_alt_count
+        // came from INFO RO/AO, which sum every sample in the VCF. On a tumor/normal file that
+        // credited the normal's reads to the tumor and produced t_ref + t_alt > t_depth on
+        // 98.4% of rows. Sample values now win for all three; INFO is only a fallback, and
+        // only when no sample was named.
         let (sample_total, sample_ref, sample_alt) =
-            Self::extract_depth_from_sample_data(&record.format_sample_data);
+            Self::extract_depth_for_sample(&record.format_sample_data, tumor);
 
-        // t_depth is the depth in the tumor sample (vcf2maf.pl:936 reads the sample's FORMAT/DP),
-        // not INFO/DP, which counts every read the caller saw at the locus and runs higher.
-        let t_depth = sample_total.or_else(|| Self::extract_total_depth(&record.info_fields));
-        if t_alt_count.is_none() {
-            t_alt_count = sample_alt;
-        }
-        if t_ref_count.is_none() {
-            t_ref_count = sample_ref;
-        }
+        // A named sample that is not in this VCF yields nothing at all — falling back to the
+        // pooled INFO counts is the exact confusion the parameter exists to remove.
+        let named_tumor_missing = matches!(tumor, Some(name)
+            if !Self::has_sample(&record.format_sample_data, name));
+
+        let (t_depth, t_ref_count, t_alt_count) = if named_tumor_missing {
+            (None, None, None)
+        } else {
+            (
+                // vcf2maf.pl:936 reads the sample's FORMAT/DP, not INFO/DP, which counts every
+                // read the caller saw at the locus and runs higher.
+                sample_total.or_else(|| Self::extract_total_depth(&record.info_fields)),
+                sample_ref.or_else(|| Self::extract_ref_depth(&record.info_fields)),
+                sample_alt.or_else(|| Self::extract_tumor_depth(&record.info_fields)),
+            )
+        };
+
+        let (n_depth, n_ref_count, n_alt_count) = match normal {
+            Some(name) => Self::extract_depth_for_sample(&record.format_sample_data, Some(name)),
+            None => (None, None, None),
+        };
 
         let vaf = match (t_alt_count, t_depth) {
             (Some(alt), Some(total)) if total > 0 => Some(alt as f32 / total as f32),
             _ => None,
         };
 
+        let hgvsc = Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSc", "ANN_HGVS_c"])
+            .filter(|s| s != ".")
+            .map(|s| Self::strip_accession(&s));
         let hgvsp = Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSp", "ANN_HGVS_p"])
-            .filter(|s| s != ".");
-        let hgvsp_short = hgvsp.as_deref().map(Self::hgvsp_to_short);
+            .filter(|s| s != ".")
+            .map(|s| Self::strip_accession(&s));
+        // The splice rule runs after the 3->1 conversion in vcf2maf.pl and assigns
+        // unconditionally, so it wins over a real HGVSp on the rare rows that have both.
+        let hgvsp_short = Self::splice_hgvsp_short(&record.info_fields, hgvsc.as_deref())
+            .or_else(|| hgvsp.as_deref().map(Self::hgvsp_to_short));
         let transcript_id = Self::get_transcript_id(&record.info_fields);
 
         Ok(MafRecord {
@@ -99,7 +142,10 @@ impl MafRecord {
                 center.to_string()
             },
             ncbi_build: ncbi_build.to_string(),
-            chromosome: Self::normalize_chromosome(&record.chromosome),
+            // The VCF's own naming is passed through unchanged (user's call
+            // 2026-08-30, reversing the earlier strip-to-bare-name behaviour). vcf2maf
+            // does the same, so this also removes a whole diff class against it.
+            chromosome: record.chromosome.clone(),
             start_position: start_pos,
             end_position: end_pos,
             // vcf2maf.pl:907 — per the MAF definition, only "+" is an accepted value here.
@@ -117,15 +163,14 @@ impl MafRecord {
             dbsnp_rs: Self::get_dbsnp_rs(&record.info_fields, record.id.as_deref()),
             dbsnp_val_status: None,
             tumor_sample_barcode: sample_barcode.to_string(),
-            matched_norm_sample_barcode: None,
+            matched_norm_sample_barcode: normal.map(str::to_string),
             validation_status: None,
             // Neither is derivable from a VCF; main.rs overwrites them when the user passes
             // --mutation-status / --sequence-source.
             mutation_status: ".".to_string(),
             sequence_source: ".".to_string(),
             sequencer: Self::extract_sequencing_info(&record.info_fields),
-            hgvsc: Self::get_annotation_field(&record.info_fields, &["CSQ_HGVSc", "ANN_HGVS_c"])
-                .filter(|s| s != "."),
+            hgvsc,
             hgvsp,
             hgvsp_short,
             transcript_id: transcript_id.clone(),
@@ -133,6 +178,9 @@ impl MafRecord {
             t_depth,
             t_ref_count,
             t_alt_count,
+            n_depth,
+            n_ref_count,
+            n_alt_count,
             filter_status: record.filter.clone(),
             qual: record.quality,
             vaf,
@@ -207,11 +255,27 @@ impl MafRecord {
     }
 
     /// Handle multi-allelic variants by creating separate MafRecord for each alternate allele
+    #[allow(dead_code)]
     pub fn from_reformatted_record_multi(
         record: &ReformattedVcfRecord,
         center: &str,
         ncbi_build: &str,
         sample_barcode: &str,
+    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+        Self::from_reformatted_record_multi_for_samples(
+            record, center, ncbi_build, sample_barcode, None, None,
+        )
+    }
+
+    /// As `from_reformatted_record_multi`, with the depth columns read from explicitly
+    /// named tumor and normal samples.
+    pub fn from_reformatted_record_multi_for_samples(
+        record: &ReformattedVcfRecord,
+        center: &str,
+        ncbi_build: &str,
+        sample_barcode: &str,
+        tumor: Option<&str>,
+        normal: Option<&str>,
     ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
         let alternates: Vec<&str> = record.alternate.split(',').collect();
         let mut maf_records = Vec::new();
@@ -248,17 +312,19 @@ impl MafRecord {
             };
 
             // Use the unified conversion logic
-            let mut maf_record = Self::from_reformatted_record(
+            let mut maf_record = Self::from_reformatted_record_for_samples(
                 &single_alt_record,
                 center,
                 ncbi_build,
                 sample_barcode,
+                tumor,
+                normal,
             )?;
 
             // Tumor_Seq_Allele1 needs the sibling ALTs a single-ALT record no longer carries:
             // a 1/2 genotype reports the *other* ALT (vcf2maf.pl:918-921).
             if alternates.len() > 1 {
-                if let Some(genotype) = Self::tumor_genotype(&record.format_sample_data) {
+                if let Some(genotype) = Self::tumor_genotype(&record.format_sample_data, tumor) {
                     if let Some(allele1) = Self::genotype_allele1(
                         &record.reference,
                         &alternates,
@@ -270,10 +336,21 @@ impl MafRecord {
                 }
             }
 
-            // Adjust depth for specific allele if available
-            if let Some(allele_depth) =
-                Self::extract_tumor_depth_for_allele(&record.info_fields, alt_index)
+            // Per-allele alt count. The tumor sample's AD wins; INFO AO is only a fallback
+            // and pools every sample, so on a tumor/normal VCF it credits the normal's reads
+            // to the tumor. A named sample that is absent gets neither.
+            let allele_alt_count = if matches!(tumor, Some(name)
+                if !Self::has_sample(&record.format_sample_data, name))
             {
+                None
+            } else {
+                Self::sample_alt_depth_for_allele(&record.format_sample_data, tumor, alt_index)
+                    .or_else(|| {
+                        Self::extract_tumor_depth_for_allele(&record.info_fields, alt_index)
+                    })
+            };
+
+            if let Some(allele_depth) = allele_alt_count {
                 maf_record.t_alt_count = Some(allele_depth);
 
                 // Recalculate VAF with allele-specific depth
@@ -291,6 +368,27 @@ impl MafRecord {
     }
 
     // Extract tumor depth for specific allele index
+    /// The alt-observation count for one specific ALT, from a sample's `AD` — which carries
+    /// one entry per allele (`ref,alt1,alt2,...`), so ALT number `n` is `AD[n + 1]`.
+    /// This is the per-sample counterpart of `extract_tumor_depth_for_allele`, which reads
+    /// INFO `AO` and therefore sums every sample in a multi-sample VCF.
+    fn sample_alt_depth_for_allele(
+        format_sample_data: &Option<ParsedFormatSample>,
+        sample: Option<&str>,
+        allele_index: usize,
+    ) -> Option<u32> {
+        format_sample_data
+            .as_ref()?
+            .samples
+            .iter()
+            .filter(|s| sample.is_none_or(|name| s.sample_name == name))
+            .find_map(|s| s.format_fields.get("AD"))?
+            .split(',')
+            .nth(allele_index + 1)?
+            .parse()
+            .ok()
+    }
+
     fn extract_tumor_depth_for_allele(
         info_fields: &HashMap<String, String>,
         allele_index: usize,
@@ -321,16 +419,31 @@ impl MafRecord {
             .and_then(|id| id.parse().ok())
     }
 
-    fn extract_depth_from_sample_data(
+    /// True when `name` is one of this record's samples.
+    fn has_sample(format_sample_data: &Option<ParsedFormatSample>, name: &str) -> bool {
+        format_sample_data
+            .as_ref()
+            .is_some_and(|d| d.samples.iter().any(|s| s.sample_name == name))
+    }
+
+    /// Depth, ref count and alt count from one sample. With `sample` set, only that sample is
+    /// considered (and an absent name yields nothing); with `None`, the historical behaviour
+    /// of taking the first sample that declares `DP` is kept.
+    fn extract_depth_for_sample(
         format_sample_data: &Option<ParsedFormatSample>,
+        sample: Option<&str>,
     ) -> (Option<u32>, Option<u32>, Option<u32>) {
         if let Some(sample_data) = format_sample_data {
             let mut total_depth = None;
             let mut ref_depth = None;
             let mut alt_depth = None;
 
-            // Check each sample for depth information
-            for sample in &sample_data.samples {
+            // Check each candidate sample for depth information
+            let candidates = sample_data
+                .samples
+                .iter()
+                .filter(|s| sample.is_none_or(|name| s.sample_name == name));
+            for sample in candidates {
                 // Total depth (DP field)
                 if let Some(dp) = sample.format_fields.get("DP") {
                     if let Ok(depth) = dp.parse::<u32>() {
@@ -538,12 +651,16 @@ impl MafRecord {
 
     /// The tumor sample's GT, taken from the first sample that declares one — the same
     /// "first sample is the tumor" assumption `extract_depth_from_sample_data` makes.
-    fn tumor_genotype(format_sample_data: &Option<ParsedFormatSample>) -> Option<String> {
+    fn tumor_genotype(
+        format_sample_data: &Option<ParsedFormatSample>,
+        sample: Option<&str>,
+    ) -> Option<String> {
         format_sample_data
             .as_ref()?
             .samples
             .iter()
-            .find_map(|sample| sample.format_fields.get("GT").cloned())
+            .filter(|s| sample.is_none_or(|name| s.sample_name == name))
+            .find_map(|s| s.format_fields.get("GT").cloned())
     }
 
     fn determine_variant_type(reference: &str, alternate: &str) -> String {
@@ -809,6 +926,52 @@ impl MafRecord {
         short
     }
 
+    /// Drop the reference-sequence accession from an HGVS string, as vcf2maf.pl:786-787 does
+    /// with `s/^.*://`. VEP writes full HGVS ("ENST00000641515.2:c.760T>A"); the MAF column
+    /// carries only the change, the accession being already present in Transcript_ID. SnpEff
+    /// writes the change bare, with no colon, so it passes through untouched.
+    fn strip_accession(hgvs: &str) -> String {
+        match hgvs.rfind(':') {
+            Some(colon) => hgvs[colon + 1..].to_string(),
+            None => hgvs.to_string(),
+        }
+    }
+
+    /// The synthetic `p.X{codon}_splice` protein change vcf2maf.pl:824-834 builds for splice
+    /// acceptor/donor variants. They sit in an intron, so VEP reports no protein change at all;
+    /// vcf2maf derives a codon number from the cDNA position so the MAF still carries a protein
+    /// coordinate. Returns None for every other consequence, and for an HGVSc whose position is
+    /// not a plain number (a 5' UTR `c.-14+1G>T` or a 3' UTR `c.*91G>T` never matches
+    /// vcf2maf's `m/^c.(\d+)/`, so it leaves HGVSp_Short alone).
+    fn splice_hgvsp_short(
+        info_fields: &HashMap<String, String>,
+        hgvsc: Option<&str>,
+    ) -> Option<String> {
+        let consequence =
+            Self::get_annotation_field(info_fields, &["CSQ_Consequence", "ANN_Annotation"])?;
+        // vcf2maf gates on One_Consequence — the most severe term, not the first one listed.
+        let term = Self::resolve_one_consequence(&consequence.to_lowercase());
+        if !matches!(
+            term.as_str(),
+            "splice_acceptor_variant" | "splice_donor_variant"
+        ) {
+            return None;
+        }
+
+        let digits: String = hgvsc?
+            .strip_prefix("c.")?
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        // vcf2maf.pl:828 guards against cDNA positions below 1 before dividing.
+        let c_pos = digits.parse::<u64>().ok()?.max(1);
+        // vcf2maf.pl:829 — sprintf( "%.0f", ( $c_pos + $c_pos % 3 ) / 3 ). Perl divides in
+        // floating point and rounds; integer division would truncate instead. The quotient is
+        // always whole, x.333 or x.667, never a .5 tie, so the rounding mode does not matter.
+        let p_pos = ((c_pos + c_pos % 3) as f64 / 3.0).round() as u64;
+        Some(format!("p.X{p_pos}_splice"))
+    }
+
     fn classify_by_impact(info_fields: &HashMap<String, String>) -> String {
         let impact = Self::get_annotation_field(info_fields, &["CSQ_IMPACT", "ANN_Annotation_Impact"]);
         match impact.as_deref().map(|s| s.to_uppercase()).as_deref() {
@@ -817,10 +980,6 @@ impl MafRecord {
             // vcf2maf.pl:1050 — "Targeted_Region" when there is no effect to go on at all.
             _ => "Targeted_Region".to_string(),
         }
-    }
-
-    fn normalize_chromosome(chr: &str) -> String {
-        chr.trim_start_matches("chr").to_string()
     }
 
     pub fn get_maf_headers() -> Vec<String> {
@@ -853,6 +1012,9 @@ impl MafRecord {
         let t_depth = self.t_depth.map(|d| d.to_string());
         let t_ref_count = self.t_ref_count.map(|d| d.to_string());
         let t_alt_count = self.t_alt_count.map(|d| d.to_string());
+        let n_depth = self.n_depth.map(|d| d.to_string());
+        let n_ref_count = self.n_ref_count.map(|d| d.to_string());
+        let n_alt_count = self.n_alt_count.map(|d| d.to_string());
         let vaf = self.vaf.map(|v| format!("{:.4}", v));
         let qual = self.qual.map(|q| q.to_string());
 
@@ -899,9 +1061,9 @@ impl MafRecord {
             t_depth.as_deref().unwrap_or(dot),
             t_ref_count.as_deref().unwrap_or(dot),
             t_alt_count.as_deref().unwrap_or(dot),
-            dot, // 43 n_depth
-            dot, // 44 n_ref_count
-            dot, // 45 n_alt_count
+            n_depth.as_deref().unwrap_or(dot),
+            n_ref_count.as_deref().unwrap_or(dot),
+            n_alt_count.as_deref().unwrap_or(dot),
             dot, // 46 all_effects — see Global Constraints: deferred, needs full transcript list
             self.filter_status.as_str(),
             qual.as_deref().unwrap_or(dot),
@@ -1118,6 +1280,103 @@ mod tests {
         assert_eq!(MafRecord::hgvsp_to_short("."), ".");
     }
 
+    /// Build a MafRecord from just the annotation fields the HGVS columns are derived from.
+    fn maf_with_hgvs(consequence: &str, hgvsc: Option<&str>, hgvsp: Option<&str>) -> MafRecord {
+        let mut info_fields = HashMap::new();
+        info_fields.insert("CSQ_Consequence".to_string(), consequence.to_string());
+        if let Some(c) = hgvsc {
+            info_fields.insert("CSQ_HGVSc".to_string(), c.to_string());
+        }
+        if let Some(p) = hgvsp {
+            info_fields.insert("CSQ_HGVSp".to_string(), p.to_string());
+        }
+        let record =
+            create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", info_fields);
+        MafRecord::from_reformatted_record(&record, "test", "GRCh38", "sample").unwrap()
+    }
+
+    #[test]
+    fn test_hgvs_strips_the_reference_sequence_accession() {
+        // vcf2maf.pl:786-787 — s/^.*:// on both. VEP writes full HGVS ("ENST...:c.760T>A");
+        // the MAF column carries only the change, since Transcript_ID sits right beside it.
+        let maf = maf_with_hgvs(
+            "missense_variant",
+            Some("ENST00000641515.2:c.760T>A"),
+            Some("ENSP00000493376.2:p.Leu254Met"),
+        );
+        assert_eq!(maf.hgvsc.as_deref(), Some("c.760T>A"));
+        assert_eq!(maf.hgvsp.as_deref(), Some("p.Leu254Met"));
+    }
+
+    #[test]
+    fn test_hgvsp_short_is_built_from_the_stripped_hgvsp() {
+        // The 3->1 conversion must run on the change alone, or the accession is carried along.
+        let maf = maf_with_hgvs(
+            "missense_variant",
+            Some("ENST00000288602.11:c.1799T>A"),
+            Some("ENSP00000288602.6:p.Val600Glu"),
+        );
+        assert_eq!(maf.hgvsp_short.as_deref(), Some("p.V600E"));
+    }
+
+    #[test]
+    fn test_hgvs_without_an_accession_is_left_alone() {
+        // SnpEff's ANN writes the change bare, with no accession and no colon.
+        let maf = maf_with_hgvs("synonymous_variant", Some("c.*91G>T"), Some("p.Pro34Pro"));
+        assert_eq!(maf.hgvsc.as_deref(), Some("c.*91G>T"));
+        assert_eq!(maf.hgvsp.as_deref(), Some("p.Pro34Pro"));
+        assert_eq!(maf.hgvsp_short.as_deref(), Some("p.P34P"));
+    }
+
+    #[test]
+    fn test_splice_site_gets_a_synthetic_hgvsp_short() {
+        // vcf2maf.pl:824-834 — splice variants are intronic, so VEP reports no protein change.
+        // vcf2maf synthesizes one from the cDNA position: p.X{codon}_splice.
+        // c.756+1G>T -> c_pos 756, 756 % 3 == 0 -> 756 / 3 = 252.
+        let maf = maf_with_hgvs(
+            "splice_donor_variant",
+            Some("ENST00000380152.8:c.756+1G>T"),
+            None,
+        );
+        assert_eq!(maf.hgvsp_short.as_deref(), Some("p.X252_splice"));
+        assert_eq!(maf.variant_classification, "Splice_Site");
+    }
+
+    #[test]
+    fn test_synthetic_splice_position_rounds_the_codon_up() {
+        // ( c_pos + c_pos % 3 ) / 3 rounded: 757 -> 758/3 = 252.67 -> 253; 758 -> 760/3 -> 253.
+        let a = maf_with_hgvs("splice_acceptor_variant", Some("c.757-2A>G"), None);
+        assert_eq!(a.hgvsp_short.as_deref(), Some("p.X253_splice"));
+        let b = maf_with_hgvs("splice_acceptor_variant", Some("c.758-1A>G"), None);
+        assert_eq!(b.hgvsp_short.as_deref(), Some("p.X253_splice"));
+    }
+
+    #[test]
+    fn test_splice_rule_keys_on_the_most_severe_consequence() {
+        // vcf2maf gates on One_Consequence, i.e. after sorting by severity — not on whichever
+        // term VEP happened to list first. splice_donor (2) outranks intron_variant (14).
+        let maf = maf_with_hgvs("intron_variant&splice_donor_variant", Some("c.300+1G>A"), None);
+        assert_eq!(maf.hgvsp_short.as_deref(), Some("p.X100_splice"));
+    }
+
+    #[test]
+    fn test_splice_rule_needs_a_numeric_cdna_position() {
+        // vcf2maf.pl:826 matches /^c.(\d+)/, which a 5' UTR position like c.-14+1 never
+        // satisfies; the rewrite is skipped and HGVSp_Short stays empty.
+        let maf = maf_with_hgvs("splice_donor_variant", Some("c.-14+1G>T"), None);
+        assert_eq!(maf.hgvsp_short, None);
+    }
+
+    #[test]
+    fn test_non_splice_consequences_keep_their_real_hgvsp_short() {
+        let maf = maf_with_hgvs(
+            "missense_variant",
+            Some("ENST00000288602.11:c.1799T>A"),
+            Some("ENSP00000288602.6:p.Val600Glu"),
+        );
+        assert_eq!(maf.hgvsp_short.as_deref(), Some("p.V600E"));
+    }
+
     #[test]
     fn test_get_exon_number_prefers_vep_exon_field() {
         let mut info = HashMap::new();
@@ -1313,10 +1572,164 @@ mod tests {
                 format_fields,
             }],
         });
-        let (total, refc, alt) = MafRecord::extract_depth_from_sample_data(&sample_data);
+        let (total, refc, alt) = MafRecord::extract_depth_for_sample(&sample_data, None);
         assert_eq!(total, Some(50));
         assert_eq!(refc, Some(30));
         assert_eq!(alt, Some(20));
+    }
+
+    /// Two samples with the pooled INFO counts a real tumor/normal freebayes VCF carries.
+    /// Modelled on the first variant of B487_1_V_vs_B487_1_cOM: INFO DP=7 RO=5 AO=2 is the
+    /// SUM over both samples, while the tumor itself has DP=1, AD=1,0.
+    fn tumor_normal_record() -> ReformattedVcfRecord {
+        use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
+        let sample = |name: &str, dp: &str, ad: &str| ParsedSample {
+            sample_name: name.to_string(),
+            format_fields: HashMap::from([
+                ("DP".to_string(), dp.to_string()),
+                ("AD".to_string(), ad.to_string()),
+            ]),
+        };
+        let mut record = create_test_maf_record(
+            "chr1", 69787, "T", "A", Some(50.0), "PASS",
+            HashMap::from([
+                ("INFO_DP".to_string(), "7".to_string()),
+                ("INFO_RO".to_string(), "5".to_string()),
+                ("INFO_AO".to_string(), "2".to_string()),
+            ]),
+        );
+        record.format_sample_data = Some(ParsedFormatSample {
+            format_keys: vec!["DP".to_string(), "AD".to_string()],
+            samples: vec![
+                sample("B487_1_V", "1", "1,0"),
+                sample("B487_1_cOM", "6", "4,2"),
+            ],
+        });
+        record
+    }
+
+    #[test]
+    fn per_allele_alt_count_comes_from_the_tumor_sample_ad_not_pooled_info_ao() {
+        // The multi path overrode t_alt_count from INFO/AO after conversion, which on a
+        // tumor/normal VCF pools every sample. The tumor's own AD carries one entry per
+        // allele (ref,alt1,alt2), and that is what each row must report.
+        use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
+        let mut record = create_test_maf_record(
+            "chr1", 1000, "A", "G,T", Some(50.0), "PASS",
+            HashMap::from([("INFO_AO".to_string(), "30,40".to_string())]),
+        );
+        record.format_sample_data = Some(ParsedFormatSample {
+            format_keys: vec!["DP".to_string(), "AD".to_string()],
+            samples: vec![
+                ParsedSample {
+                    sample_name: "TUMOR".to_string(),
+                    format_fields: HashMap::from([
+                        ("DP".to_string(), "20".to_string()),
+                        ("AD".to_string(), "10,3,7".to_string()),
+                    ]),
+                },
+                ParsedSample {
+                    sample_name: "NORMAL".to_string(),
+                    format_fields: HashMap::from([
+                        ("DP".to_string(), "60".to_string()),
+                        ("AD".to_string(), "5,27,33".to_string()),
+                    ]),
+                },
+            ],
+        });
+
+        let mafs = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", Some("TUMOR"), None,
+        )
+        .unwrap();
+
+        assert_eq!(mafs.len(), 2);
+        assert_eq!(mafs[0].t_alt_count, Some(3), "first ALT takes the tumor's AD[1]");
+        assert_eq!(mafs[1].t_alt_count, Some(7), "second ALT takes the tumor's AD[2]");
+        for m in &mafs {
+            let (d, r, a) = (m.t_depth.unwrap(), m.t_ref_count.unwrap(), m.t_alt_count.unwrap());
+            assert!(r + a <= d, "t_ref {r} + t_alt {a} exceeds t_depth {d}");
+        }
+    }
+
+    #[test]
+    fn tumor_counts_all_come_from_the_tumor_sample_not_pooled_info() {
+        // The bug: t_depth was read from the sample while t_ref_count/t_alt_count came from
+        // INFO RO/AO, which sum every sample. That produced t_ref + t_alt = 7 against a
+        // t_depth of 1, and credited the normal's 2 alt reads to the tumor.
+        let record = tumor_normal_record();
+        let maf = MafRecord::from_reformatted_record_for_samples(
+            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+        )
+        .unwrap();
+
+        assert_eq!(maf.t_depth, Some(1));
+        assert_eq!(maf.t_ref_count, Some(1));
+        assert_eq!(maf.t_alt_count, Some(0));
+    }
+
+    #[test]
+    fn tumor_ref_and_alt_counts_never_exceed_tumor_depth() {
+        let record = tumor_normal_record();
+        let maf = MafRecord::from_reformatted_record_for_samples(
+            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+        )
+        .unwrap();
+        let (d, r, a) = (
+            maf.t_depth.unwrap(),
+            maf.t_ref_count.unwrap(),
+            maf.t_alt_count.unwrap(),
+        );
+        assert!(r + a <= d, "t_ref_count {r} + t_alt_count {a} exceeds t_depth {d}");
+    }
+
+    #[test]
+    fn naming_the_normal_sample_populates_the_matched_normal_columns() {
+        let record = tumor_normal_record();
+        let maf = MafRecord::from_reformatted_record_for_samples(
+            &record, "c", "GRCh38", "s", Some("B487_1_V"), Some("B487_1_cOM"),
+        )
+        .unwrap();
+
+        assert_eq!(maf.n_depth, Some(6));
+        assert_eq!(maf.n_ref_count, Some(4));
+        assert_eq!(maf.n_alt_count, Some(2));
+        assert_eq!(maf.matched_norm_sample_barcode.as_deref(), Some("B487_1_cOM"));
+    }
+
+    #[test]
+    fn matched_normal_columns_stay_empty_when_no_normal_is_named() {
+        let record = tumor_normal_record();
+        let maf = MafRecord::from_reformatted_record_for_samples(
+            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+        )
+        .unwrap();
+
+        assert_eq!(maf.n_depth, None);
+        assert_eq!(maf.n_ref_count, None);
+        assert_eq!(maf.n_alt_count, None);
+    }
+
+    #[test]
+    fn an_unknown_sample_name_yields_nothing_rather_than_the_first_sample() {
+        // Falling back to sample 1 would reproduce the guess this parameter exists to remove.
+        let record = tumor_normal_record();
+        let maf = MafRecord::from_reformatted_record_for_samples(
+            &record, "c", "GRCh38", "s", Some("NOT_IN_THIS_VCF"), None,
+        )
+        .unwrap();
+
+        assert_eq!(maf.t_ref_count, None);
+        assert_eq!(maf.t_alt_count, None);
+    }
+
+    #[test]
+    fn without_a_named_tumor_the_first_sample_is_still_used() {
+        // Existing single-sample behaviour must not change; only naming a sample changes it.
+        let record = tumor_normal_record();
+        let maf =
+            MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        assert_eq!(maf.t_depth, Some(1));
     }
 
     // Local equivalent of tests/test.rs's `create_test_maf_record` helper — that helper lives

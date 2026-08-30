@@ -1463,7 +1463,7 @@ fn test_maf_snp_creation() {
 
     // Test basic fields - now with consistent MAF formatting
     assert_eq!(maf_record.hugo_symbol, "TP53");
-    assert_eq!(maf_record.chromosome, "17"); // Now normalized (removes "chr")
+    assert_eq!(maf_record.chromosome, "chr17"); // VCF naming passed through unchanged
     assert_eq!(maf_record.start_position, 7674220);
     assert_eq!(maf_record.end_position, 7674220); // SNP has same start/end
     assert_eq!(maf_record.variant_type, "SNP");
@@ -1481,14 +1481,11 @@ fn test_maf_snp_creation() {
         Some("ENST00000269305".to_string())
     );
     assert_eq!(maf_record.protein_position, Some("175".to_string()));
-    assert_eq!(
-        maf_record.hgvsp,
-        Some("ENSP00000269305.4:p.Arg175His".to_string())
-    );
-    assert_eq!(
-        maf_record.hgvsc,
-        Some("ENST00000269305.8:c.524G>A".to_string())
-    );
+    // vcf2maf.pl:786-787 strips the reference-sequence accession; the transcript is already
+    // reported in Transcript_ID, checked just above.
+    assert_eq!(maf_record.hgvsp, Some("p.Arg175His".to_string()));
+    assert_eq!(maf_record.hgvsc, Some("c.524G>A".to_string()));
+    assert_eq!(maf_record.hgvsp_short, Some("p.R175H".to_string()));
 }
 
 #[test]
@@ -1514,7 +1511,7 @@ fn test_maf_insertion_positions() {
     assert_eq!(maf_record.end_position, 1001); // INS: start + 1
     assert_eq!(maf_record.reference_allele, "-"); // MAF format uses "-" for insertions
     assert_eq!(maf_record.tumor_seq_allele2, "TCG"); // Inserted bases only (stripped shared "A" prefix)
-    assert_eq!(maf_record.chromosome, "1"); // Normalized chromosome
+    assert_eq!(maf_record.chromosome, "chr1"); // VCF naming passed through unchanged
 }
 
 #[test]
@@ -1540,7 +1537,7 @@ fn test_maf_deletion_positions() {
     assert_eq!(maf_record.end_position, 2003); // Last deleted base
     assert_eq!(maf_record.reference_allele, "TCG"); // Deleted bases only (stripped shared "A" prefix)
     assert_eq!(maf_record.tumor_seq_allele2, "-"); // MAF format uses "-" for deletions
-    assert_eq!(maf_record.chromosome, "2"); // Normalized chromosome
+    assert_eq!(maf_record.chromosome, "chr2"); // VCF naming passed through unchanged
 }
 
 #[test]
@@ -1691,7 +1688,7 @@ fn test_maf_tsv_line_format() {
     assert_eq!(fields[0], "EGFR"); // Hugo_Symbol
     assert_eq!(fields[2], "TCGA"); // Center
     assert_eq!(fields[3], "GRCh38"); // NCBI_Build
-    assert_eq!(fields[4], "7"); // Chromosome (now normalized)
+    assert_eq!(fields[4], "chr7"); // VCF naming passed through unchanged // Chromosome (now normalized)
     assert_eq!(fields[5], "55191822"); // Start_Position
     assert_eq!(fields[37], "ENST00000275493"); // Transcript_ID
     assert_eq!(fields[46], "PASS"); // FILTER
@@ -1702,19 +1699,21 @@ fn test_maf_tsv_line_format() {
 fn test_maf_chromosome_normalization() {
     use vcf_reformatter::essentials_fields::MafRecord;
 
-    // Test various chromosome formats - now properly normalized
+    // The VCF's own chromosome naming is passed through unchanged (user's call
+    // 2026-08-30, reversing the earlier strip-to-bare-name behaviour). vcf2maf does
+    // the same, so this also removes a diff class against it.
     let test_cases = vec![
         ("1", "1"),
-        ("chr1", "1"),    // Now normalized to remove "chr"
-        ("CHR1", "CHR1"), // Only lowercase "chr" is removed
+        ("chr1", "chr1"),
+        ("CHR1", "CHR1"),
         ("X", "X"),
-        ("chrX", "X"), // Normalized
+        ("chrX", "chrX"),
         ("Y", "Y"),
-        ("chrY", "Y"), // Normalized
+        ("chrY", "chrY"),
         ("M", "M"),
         ("MT", "MT"),
-        ("chrM", "M"),   // Normalized
-        ("chrMT", "MT"), // Normalized
+        ("chrM", "chrM"),
+        ("chrMT", "chrMT"),
     ];
 
     for (input, expected) in test_cases {
@@ -2411,7 +2410,7 @@ fn test_maf_multi_allelic_conversion() {
     assert_eq!(maf_record.end_position, 1001);
     assert_eq!(maf_record.reference_allele, "-");
     assert_eq!(maf_record.tumor_seq_allele2, "TCG"); // Stripped shared "A" prefix
-    assert_eq!(maf_record.chromosome, "1");
+    assert_eq!(maf_record.chromosome, "chr1");
 }
 
 #[test]
@@ -2440,7 +2439,7 @@ fn test_maf_multi_deletion_conversion() {
     assert_eq!(maf_record.end_position, 2003); // Last deleted base
     assert_eq!(maf_record.reference_allele, "TCG"); // Stripped shared "A" prefix
     assert_eq!(maf_record.tumor_seq_allele2, "-");
-    assert_eq!(maf_record.chromosome, "2");
+    assert_eq!(maf_record.chromosome, "chr2");
 }
 
 use std::process::Command;
