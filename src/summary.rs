@@ -255,6 +255,30 @@ fn build_metric_breakdown(
 /// PolyPhen entries; SnpEff input yields an Impact entry. Neither present
 /// yields an empty `Vec`, in which case the HTML report omits the chart
 /// section entirely.
+/// Fold one chunk's breakdowns into an accumulator, so a file can be summarised without ever
+/// holding all of its records at once. Summing counts per chromosome per category is the whole
+/// operation — the result must equal `compute_damage_breakdowns` over the concatenated input.
+pub fn merge_damage_breakdowns(acc: &mut Vec<DamageBreakdown>, next: Vec<DamageBreakdown>) {
+    for incoming in next {
+        match acc.iter_mut().find(|b| b.metric_name == incoming.metric_name) {
+            Some(existing) => {
+                for cat in incoming.categories {
+                    if !existing.categories.contains(&cat) {
+                        existing.categories.push(cat);
+                    }
+                }
+                for (chrom, counts) in incoming.per_chrom_counts {
+                    let entry = existing.per_chrom_counts.entry(chrom).or_default();
+                    for (cat, n) in counts {
+                        *entry.entry(cat).or_insert(0) += n;
+                    }
+                }
+            }
+            None => acc.push(incoming),
+        }
+    }
+}
+
 pub fn compute_damage_breakdowns(records: &[ReformattedVcfRecord]) -> Vec<DamageBreakdown> {
     let mut result = Vec::new();
 
@@ -477,6 +501,30 @@ mod tests {
             .unwrap();
         assert_eq!(polyphen.categories, vec!["probably_damaging", "benign"]);
         assert!(!polyphen.per_chrom_counts.contains_key("chr2"));
+    }
+
+    #[test]
+    fn merging_two_chunks_equals_computing_over_the_whole() {
+        // The chunked MAF path never holds every record, so the merged counts must match what
+        // a single pass over all of them would have produced.
+        let all = vec![
+            make_record("chr1", &[("CSQ_SIFT", "deleterious(0.01)")]),
+            make_record("chr1", &[("CSQ_SIFT", "tolerated(0.4)")]),
+            make_record("chr2", &[("CSQ_SIFT", "deleterious(0.02)")]),
+            make_record("chr2", &[("CSQ_SIFT", "deleterious(0.03)")]),
+        ];
+        let whole = compute_damage_breakdowns(&all);
+
+        let mut merged = Vec::new();
+        for chunk in all.chunks(2) {
+            merge_damage_breakdowns(&mut merged, compute_damage_breakdowns(chunk));
+        }
+
+        assert_eq!(merged.len(), whole.len());
+        for (m, w) in merged.iter().zip(whole.iter()) {
+            assert_eq!(m.metric_name, w.metric_name);
+            assert_eq!(m.per_chrom_counts, w.per_chrom_counts);
+        }
     }
 
     #[test]

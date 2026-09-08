@@ -667,7 +667,7 @@ fn main() {
                             output_chrom_counts,
                             process_time.as_secs_f64(),
                             variants_per_sec,
-                            Some(&records),
+                            summary::compute_damage_breakdowns(&records),
                         );
                     } else if data.2.len() > 100_000 && cli.report != ReportFormatCli::None {
                         eprintln!("⚠️  Report skipped: dataset was streamed in chunks (memory-efficient mode for large files)");
@@ -750,10 +750,11 @@ fn main() {
                 transcript_handling,
                 verbose: cli.verbose,
                 use_parallel,
+                compute_damage: cli.report == ReportFormatCli::Html,
             };
 
             // Convert to MAF records using the fixed function
-            let (mut maf_records, reformatted_records) = match convert_to_maf_records(&params) {
+            let (mut maf_records, damage_breakdowns) = match convert_to_maf_records(&params) {
                 Ok(result) => result,
                 Err(e) => {
                     eprintln!("❌ Error converting to MAF: {e}");
@@ -825,7 +826,7 @@ fn main() {
                     output_chrom_counts,
                     process_time.as_secs_f64(),
                     variants_per_sec,
-                    Some(&reformatted_records),
+                    damage_breakdowns,
                 );
             }
             let total_time = total_start.elapsed();
@@ -1001,7 +1002,7 @@ fn write_summary_if_requested(
     output_chrom_counts: indexmap::IndexMap<String, usize>,
     process_time_secs: f64,
     variants_per_sec: f64,
-    damage_records: Option<&[reformat_vcf::ReformattedVcfRecord]>,
+    damage_breakdowns: Vec<summary::DamageBreakdown>,
 ) {
     if cli.report == ReportFormatCli::None {
         return;
@@ -1042,12 +1043,9 @@ fn write_summary_if_requested(
             }
         }
         ReportFormatCli::Html => {
-            let breakdowns = damage_records
-                .map(summary::compute_damage_breakdowns)
-                .unwrap_or_default();
             let summary_file = generate_summary_filename(cli, "html");
             if let Err(e) =
-                html_report::write_html_report(&summary_stats, &breakdowns, &summary_file)
+                html_report::write_html_report(&summary_stats, &damage_breakdowns, &summary_file)
             {
                 eprintln!("Warning: Could not write summary report: {}", e);
             } else {
@@ -1121,71 +1119,68 @@ struct MafConversionParams<'a> {
     transcript_handling: TranscriptHandling,
     verbose: bool,
     use_parallel: bool,
+    /// Only the HTML report reads the damage counts; with no report they are pure waste.
+    compute_damage: bool,
 }
 
 fn convert_to_maf_records(
     params: &MafConversionParams,
-) -> Result<(Vec<MafRecord>, Vec<reformat_vcf::ReformattedVcfRecord>), String> {
-    // For MAF conversion, we need the actual records, so we can't use the streaming function
-    // We'll use the regular functions that return (headers, records) tuples
-    let reformatted_records = if params.use_parallel {
-        if params.verbose {
-            println!("   🚀 Using parallel processing for MAF conversion...");
-            if params.data_lines.len() > 100_000 {
-                println!("   📦 Large dataset detected ({} variants) - using parallel processing for MAF conversion", params.data_lines.len());
-            }
-        }
+) -> Result<(Vec<MafRecord>, Vec<summary::DamageBreakdown>), String> {
+    // Lines are converted a chunk at a time and each chunk's ReformattedVcfRecords are dropped
+    // as soon as its MAF rows exist. Holding the whole intermediate vec alongside the MAF vec
+    // cost ~1GB on a 92k-variant file, purely so the HTML report could read it afterwards; the
+    // report only needs the damage counts, which are folded in per chunk instead.
+    const CHUNK: usize = 25_000;
 
-        // For MAF, we always use the regular parallel function (not streaming)
-        // because we need access to all records to convert them to MAF
-        reformat_vcf_data_with_header_parallel(
-            params.header,
-            params.columns_title,
-            params.data_lines,
-            params.transcript_handling,
-        )
-    } else {
-        reformat_vcf_data_with_header(
-            params.header,
-            params.columns_title,
-            params.data_lines,
-            params.transcript_handling,
-        )
+    let mut maf_records = Vec::new();
+    let mut breakdowns: Vec<summary::DamageBreakdown> = Vec::new();
+
+    if params.verbose && params.use_parallel {
+        println!("   🚀 Using parallel processing for MAF conversion...");
     }
+
+    for chunk in params.data_lines.chunks(CHUNK) {
+        let (_, reformatted) = if params.use_parallel {
+            reformat_vcf_data_with_header_parallel(
+                params.header,
+                params.columns_title,
+                chunk,
+                params.transcript_handling,
+            )
+        } else {
+            reformat_vcf_data_with_header(
+                params.header,
+                params.columns_title,
+                chunk,
+                params.transcript_handling,
+            )
+        }
         .map_err(|e| format!("Failed to process VCF data: {}", e))?;
 
-    if params.verbose {
-        println!(
-            "   ✅ Processed {} VCF records",
-            reformatted_records.1.len()
-        );
-        println!("🔄 Converting to MAF format...");
-    }
+        if params.compute_damage {
+            summary::merge_damage_breakdowns(
+                &mut breakdowns,
+                summary::compute_damage_breakdowns(&reformatted),
+            );
+        }
 
-    // Convert to MAF records
-    let maf_records: Result<Vec<MafRecord>, _> = reformatted_records
-        .1 // Access the records part of the tuple (headers, records)
-        .iter()
-        .flat_map(|record| {
-            match MafRecord::from_reformatted_record_multi_for_samples(
+        for record in &reformatted {
+            let converted = MafRecord::from_reformatted_record_multi_for_samples(
                 record,
                 params.center,
                 params.ncbi_build,
                 params.sample_barcode,
                 params.tumor_id,
                 params.normal_id,
-            ) {
-                Ok(records) => records.into_iter().map(Ok).collect::<Vec<_>>(),
-                Err(e) => vec![Err(e)],
-            }
-        })
-        .collect();
-
-    let maf_records = maf_records.map_err(|e| format!("Failed to convert to MAF format: {}", e))?;
+            )
+            .map_err(|e| format!("Failed to convert to MAF format: {}", e))?;
+            maf_records.extend(converted);
+        }
+    }
 
     if params.verbose {
         println!("   ✅ Generated {} MAF records", maf_records.len());
     }
 
-    Ok((maf_records, reformatted_records.1))
+    Ok((maf_records, breakdowns))
 }
