@@ -178,9 +178,11 @@ fn build_maf_batch(
                 "VAF" => Arc::new(
                     records.iter().map(|r| r.vaf.map(|v| v as f64)).collect::<arrow::array::Float64Array>(),
                 ),
+                // An unpopulated MAF cell is an empty string in the text output; parquet is
+                // typed, so it gets a real NULL rather than an empty string.
                 _ => Arc::new(
                     rows.iter()
-                        .map(|row| Some(row[col_idx]))
+                        .map(|row| Some(row[col_idx]).filter(|v| !v.is_empty()))
                         .collect::<StringArray>(),
                 ),
             }

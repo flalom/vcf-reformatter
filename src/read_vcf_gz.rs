@@ -66,6 +66,16 @@ fn parse_vcf_reader(
         }
     }
 
+    // No #CHROM line means this was not a VCF at all — an empty stream, a truncated one, or
+    // the wrong file. Reporting "completed successfully" over a 1-byte output file is worse
+    // than failing. A real VCF carrying zero variants still has the line, and still succeeds.
+    if columns_title.is_empty() {
+        return Err(format!(
+            "no #CHROM header line found after {line_count} line(s) — is this a VCF?"
+        )
+        .into());
+    }
+
     println!("Total lines read: {line_count}");
     println!("Header lines: {}", header.matches('\n').count());
     println!("Data lines: {}", data_lines.len());
@@ -109,18 +119,27 @@ mod tests {
 
     #[test]
     fn test_sniff_gzip_reader_short_input() {
-        // Fewer than 2 bytes total: must not panic on the magic-number slice.
+        // Fewer than 2 bytes total: must not panic on the magic-number slice. It is still not
+        // a VCF, so it is rejected rather than read as one data line.
         let reader = sniff_gzip_reader(Cursor::new(b"a".to_vec())).unwrap();
-        let (_, _, data) = parse_vcf_reader(reader).unwrap();
-        assert_eq!(data.len(), 1); // treated as a single data line "a"
+        assert!(parse_vcf_reader(reader).is_err());
     }
 
     #[test]
     fn test_sniff_gzip_reader_empty_input() {
+        // An empty stream used to "complete successfully" over a 1-byte output file.
         let reader = sniff_gzip_reader(Cursor::new(Vec::new())).unwrap();
-        let (header, columns, data) = parse_vcf_reader(reader).unwrap();
-        assert!(header.is_empty());
-        assert!(columns.is_empty());
+        let err = parse_vcf_reader(reader).unwrap_err().to_string();
+        assert!(err.contains("#CHROM"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn test_vcf_with_header_but_no_variants_is_accepted() {
+        // Zero variants is a legitimate VCF; only a missing #CHROM line is an error.
+        let text = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+        let reader = sniff_gzip_reader(Cursor::new(text.as_bytes().to_vec())).unwrap();
+        let (_, columns, data) = parse_vcf_reader(reader).unwrap();
+        assert!(columns.contains("CHROM"));
         assert!(data.is_empty());
     }
 }

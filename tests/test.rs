@@ -2634,6 +2634,42 @@ fn test_mutation_status_and_sequence_source_flags() {
 }
 
 #[test]
+#[cfg(feature = "parquet_out")]
+fn test_parquet_filename_keeps_the_format_extension_on_both_paths() {
+    use std::io::Write;
+
+    let mut temp_vcf = tempfile::NamedTempFile::new().unwrap();
+    let vcf_content = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t100\t.\tA\tG\t60\tPASS\tDP=50\n";
+    write!(temp_vcf, "{}", vcf_content).unwrap();
+    temp_vcf.flush().unwrap();
+
+    let dir = tempdir().unwrap();
+    // The extension says what the parquet holds, so both paths keep it. The TSV path used to
+    // strip it and write "pq_reformatted.parquet" against the MAF path's ".maf.parquet".
+    for (format, expected) in [("tsv", "pq_reformatted.tsv.parquet"), ("maf", "pq_reformatted.maf.parquet")] {
+        let output = Command::new("cargo")
+            .args([
+                "run", "--",
+                temp_vcf.path().to_str().unwrap(),
+                "-o", dir.path().to_str().unwrap(),
+                "-p", "pq",
+                "--output-format", format,
+                "--report", "none",
+                "--parquet",
+                // This VCF has no sample columns; MAF output refuses to run without a barcode.
+                "--sample-barcode", "TUMOR",
+            ])
+            .output()
+            .expect("Failed to execute vcf-reformatter");
+        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            dir.path().join(expected).exists(),
+            "--output-format {format} should write {expected}"
+        );
+    }
+}
+
+#[test]
 fn test_multiallelic_warning_on_stderr() {
     use std::io::Write;
 

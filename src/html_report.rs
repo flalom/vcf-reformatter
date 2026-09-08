@@ -75,6 +75,32 @@ td.chrom { font-family: var(--mono); }
 .damage-controls { margin-bottom: 0.75rem; font-size: 0.85rem; }
 .damage-controls select { font-family: var(--sans); margin-left: 0.5rem; }
 #damage-chart svg { width: 100%; height: auto; }
+.damage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.legend-item { display: inline-flex; align-items: center; gap: 0.35rem; }
+.legend-item .swatch { width: 0.7rem; height: 0.7rem; border-radius: 2px; }
+rect.seg { cursor: crosshair; }
+rect.seg:hover { opacity: 0.82; }
+.damage-tooltip {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 10;
+  background: var(--card-bg);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
 "#;
 
 const DAMAGE_CHART_JS: &str = r#"
@@ -92,22 +118,51 @@ const DAMAGE_CHART_JS: &str = r#"
       const width = 480;
       const barHeight = 22;
       const gap = 8;
+      const labelWidth = 90;
       let svg = '<svg viewBox="0 0 ' + width + ' ' + ((barHeight + gap) * data.chroms.length) + '" xmlns="http://www.w3.org/2000/svg">';
       data.chroms.forEach((row, i) => {
         const total = row.counts.reduce((a, b) => a + b, 0) || 1;
-        let x = 90;
+        let x = labelWidth;
         const y = i * (barHeight + gap);
-        svg += '<text x="0" y="' + (y + barHeight / 2 + 4) + '" font-size="12" font-family="ui-monospace, monospace">' + escapeHtml(row.chrom) + '</text>';
+        svg += '<text x="0" y="' + (y + barHeight / 2 + 4) + '" font-size="12" font-family="ui-monospace, monospace" fill="currentColor">' + escapeHtml(row.chrom) + '</text>';
         row.counts.forEach((count, ci) => {
-          const segWidth = (count / total) * (width - 90);
+          const segWidth = (count / total) * (width - labelWidth);
           if (segWidth > 0) {
-            svg += '<rect x="' + x + '" y="' + y + '" width="' + segWidth + '" height="' + barHeight + '" fill="' + data.colors[ci] + '"><title>' + escapeHtml(data.categories[ci]) + ': ' + count + '</title></rect>';
+            const pct = 100 * count / total;
+            svg += '<rect class="seg" x="' + x + '" y="' + y + '" width="' + segWidth + '" height="' + barHeight + '" fill="' + data.colors[ci] + '"'
+                 + ' data-chrom="' + escapeHtml(row.chrom) + '" data-cat="' + escapeHtml(data.categories[ci]) + '"'
+                 + ' data-count="' + count + '" data-pct="' + pct.toFixed(1) + '"></rect>';
+            // Below ~26 units the label would spill into the neighbouring segment; hovering
+            // still gives the exact number, so a narrow slice simply goes unlabelled.
+            if (segWidth >= 26) {
+              svg += '<text x="' + (x + segWidth / 2) + '" y="' + (y + barHeight / 2 + 4) + '" font-size="10" text-anchor="middle" fill="white" pointer-events="none">' + pct.toFixed(0) + '%</text>';
+            }
             x += segWidth;
           }
         });
       });
       svg += '</svg>';
-      container.innerHTML = svg;
+
+      let legend = '<div class="damage-legend">';
+      data.categories.forEach((cat, ci) => {
+        legend += '<span class="legend-item"><span class="swatch" style="background:' + data.colors[ci] + '"></span>' + escapeHtml(cat) + '</span>';
+      });
+      legend += '</div>';
+      container.innerHTML = legend + svg;
+
+      const tip = document.getElementById('damage-tooltip');
+      container.querySelectorAll('rect.seg').forEach((seg) => {
+        seg.addEventListener('mousemove', (e) => {
+          // textContent, not innerHTML: dataset gives the values back decoded, and this is
+          // annotator-supplied text.
+          tip.textContent = seg.dataset.chrom + ' · ' + seg.dataset.cat + ' — '
+            + seg.dataset.count + ' (' + seg.dataset.pct + '%)';
+          tip.style.display = 'block';
+          tip.style.left = (e.pageX + 14) + 'px';
+          tip.style.top = (e.pageY + 14) + 'px';
+        });
+        seg.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+      });
     }
 "#;
 
@@ -239,6 +294,7 @@ fn render_damage_section(breakdowns: &[DamageBreakdown]) -> String {
         section.push_str("  </div>\n");
     }
     section.push_str("  <div id=\"damage-chart\"></div>\n");
+    section.push_str("  <div id=\"damage-tooltip\" class=\"damage-tooltip\"></div>\n");
     section.push_str("  <script>\n");
     writeln!(
         section,
@@ -488,6 +544,38 @@ mod tests {
             "expected exactly one (the report's own) </script> tag, found {script_close_count}"
         );
         assert!(html.contains("\\u003C"));
+    }
+
+    #[test]
+    fn test_damage_chart_has_legend_percent_labels_and_tooltip() {
+        let stats = sample_stats();
+        let mut chr1 = IndexMap::new();
+        chr1.insert("HIGH".to_string(), 3usize);
+        chr1.insert("LOW".to_string(), 1usize);
+        let mut per_chrom = IndexMap::new();
+        per_chrom.insert("chr1".to_string(), chr1);
+        let breakdown = DamageBreakdown {
+            metric_name: "Impact".to_string(),
+            categories: vec!["HIGH".to_string(), "LOW".to_string()],
+            per_chrom_counts: per_chrom,
+        };
+
+        let html = render(&stats, &[breakdown], "2026-09-08 12:00:00");
+
+        assert!(html.contains("damage-legend"), "a colour legend must be rendered");
+        assert!(html.contains("legend-item"));
+        assert!(
+            html.contains("fill=\"white\"") && html.contains("pct.toFixed(0)"),
+            "each wide enough segment gets its percentage in white"
+        );
+        assert!(
+            html.contains("id=\"damage-tooltip\"") && html.contains("mousemove"),
+            "hovering a segment must show the count and percentage"
+        );
+        assert!(
+            html.contains("tip.textContent"),
+            "tooltip text is set with textContent, never innerHTML"
+        );
     }
 
     #[test]

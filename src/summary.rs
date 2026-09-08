@@ -114,7 +114,7 @@ pub fn sort_chromosomes(counts: IndexMap<String, usize>) -> IndexMap<String, usi
 /// Sort any chromosome-keyed entries in natural order (see `chrom_sort_key`).
 /// Shared by `sort_chromosomes` and `compute_damage_breakdowns`.
 fn sort_by_chromosome<V>(mut entries: Vec<(String, V)>) -> Vec<(String, V)> {
-    entries.sort_by(|(a, _), (b, _)| chrom_sort_key(a).cmp(&chrom_sort_key(b)));
+    entries.sort_by_key(|(a, _)| chrom_sort_key(a));
     entries
 }
 

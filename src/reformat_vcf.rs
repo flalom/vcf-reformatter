@@ -13,7 +13,7 @@
 //! - Parallel processing support for large files
 //! - Flexible output formatting
 //! ```
-use crate::essentials_fields::MafRecord;
+use crate::essentials_fields::{biotype_priority, MafRecord};
 use crate::extract_ann_and_ann_names::extract_ann_regex;
 use crate::extract_csq_and_csq_names::extract_csq_regex;
 use crate::extract_sample_info::ParsedFormatSample;
@@ -586,6 +586,11 @@ pub fn sanitize_field_name(field_name: &str) -> String {
         .to_string()
 }
 
+/// Pick the one CSQ annotation vcf2maf would report, porting `vcf2maf.pl:871-894`:
+/// sort by transcript biotype, then consequence severity, then longest transcript; then
+/// take the worst-affected *gene* and that gene's canonical isoform. Biotype outranks
+/// severity, so a milder consequence on a protein_coding transcript beats a worse one on
+/// an lncRNA — and the canonical isoform wins even when a sibling isoform is more severe.
 fn find_most_severe_consequence(
     annotations: &[&str],
     csq_field_names: &[String],
@@ -594,70 +599,65 @@ fn find_most_severe_consequence(
         return Err("No annotations provided".into());
     }
 
-    let severity_order = vec![
-        "transcript_ablation",
-        "splice_acceptor_variant",
-        "splice_donor_variant",
-        "stop_gained",
-        "frameshift_variant",
-        "stop_lost",
-        "start_lost",
-        "transcript_amplification",
-        "inframe_insertion",
-        "inframe_deletion",
-        "missense_variant",
-        "protein_altering_variant",
-        "splice_region_variant",
-        "incomplete_terminal_codon_variant",
-        "start_retained_variant",
-        "stop_retained_variant",
-        "synonymous_variant",
-        "coding_sequence_variant",
-        "mature_miRNA_variant",
-        "5_prime_UTR_variant",
-        "3_prime_UTR_variant",
-        "non_coding_transcript_exon_variant",
-        "intron_variant",
-        "NMD_transcript_variant",
-        "non_coding_transcript_variant",
-        "upstream_gene_variant",
-        "downstream_gene_variant",
-        "TFBS_ablation",
-        "TFBS_amplification",
-        "TF_binding_site_variant",
-        "regulatory_region_ablation",
-        "regulatory_region_amplification",
-        "feature_elongation",
-        "regulatory_region_variant",
-        "feature_truncation",
-        "intergenic_variant",
-    ];
+    let idx = |name: &str, default: usize| {
+        csq_field_names
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or(default)
+    };
+    let (i_cons, i_symbol, i_biotype, i_canonical, i_cdna) = (
+        idx("Consequence", 1),
+        idx("SYMBOL", 3),
+        idx("BIOTYPE", 7),
+        idx("CANONICAL", 23),
+        idx("cDNA_position", 12),
+    );
 
-    let mut most_severe_annotation = annotations[0];
-    let mut best_severity = usize::MAX;
+    let field = |a: &str, i: usize| a.split('|').nth(i).unwrap_or("").to_string();
 
-    let consequence_index = csq_field_names
-        .iter()
-        .position(|name| name == "Consequence")
-        .unwrap_or(1);
+    // vcf2maf.pl:862-863 — Transcript_Length is the denominator of cDNA_position.
+    let transcript_length = |a: &str| -> u64 {
+        field(a, i_cdna)
+            .rsplit_once('/')
+            .and_then(|(_, len)| len.parse().ok())
+            .unwrap_or(0)
+    };
+    let severity = |a: &str| {
+        MafRecord::effect_priority(&MafRecord::resolve_one_consequence(
+            &field(a, i_cons).to_lowercase(),
+        ))
+    };
 
-    for annotation in annotations {
-        let values: Vec<&str> = annotation.split('|').collect();
-        if let Some(consequence) = values.get(consequence_index) {
-            let consequences: Vec<&str> = consequence.split('&').collect();
+    // vcf2maf.pl:871-875. Rust's sort_by is stable, as Perl's sort is, so equal-key
+    // annotations keep their input order in both.
+    let mut sorted: Vec<&str> = annotations.to_vec();
+    sorted.sort_by(|a, b| {
+        biotype_priority(&field(a, i_biotype))
+            .cmp(&biotype_priority(&field(b, i_biotype)))
+            .then_with(|| severity(a).cmp(&severity(b)))
+            .then_with(|| transcript_length(b).cmp(&transcript_length(a)))
+    });
 
-            for cons in consequences {
-                if let Some(severity) = severity_order.iter().position(|&x| x == cons) {
-                    if severity < best_severity {
-                        best_severity = severity;
-                        most_severe_annotation = annotation;
-                    }
-                }
-            }
-        }
-    }
+    let has_symbol = |a: &str| !field(a, i_symbol).is_empty();
+    let is_canonical = |a: &str| field(a, i_canonical) == "YES";
 
-    parse_single_annotation("CSQ", most_severe_annotation, csq_field_names)
+    // vcf2maf.pl:878-880 — the worst affected GENE, not the worst effect.
+    let maf_gene = sorted.iter().find(|a| has_symbol(a)).map(|a| field(a, i_symbol));
+
+    // vcf2maf.pl:888, then :891, then :893. The two --custom-enst branches (:883, :886)
+    // have no equivalent here — this tool exposes no isoform override.
+    let selected = maf_gene
+        .as_ref()
+        .and_then(|gene| {
+            sorted
+                .iter()
+                .find(|a| &field(a, i_symbol) == gene && is_canonical(a))
+        })
+        .or_else(|| sorted.iter().find(|a| has_symbol(a) && is_canonical(a)))
+        .copied()
+        .unwrap_or(sorted[0]);
+
+    parse_single_annotation("CSQ", selected, csq_field_names)
 }
 /// Reformat VCF data with header information for annotation field extraction
 ///
@@ -1122,4 +1122,94 @@ fn extract_sample_value_for_header_cow<'a>(sample_data: &'a ParsedFormatSample, 
         }
     }
     Cow::Borrowed(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn csq_fields() -> Vec<String> {
+        ["Consequence", "SYMBOL", "BIOTYPE", "CANONICAL", "cDNA_position"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn most_severe_ranks_terms_the_old_36_term_list_never_had() {
+        // splice_donor_5th_base_variant is in EFFECT_PRIORITY but was absent from the
+        // hand-written list this function used to carry, so an annotation holding only it
+        // scored nothing and could never be selected.
+        let annotations = vec![
+            "intron_variant|GENEA|protein_coding|YES|100/1000",
+            "splice_donor_5th_base_variant|GENEB|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("GENEB"));
+    }
+
+    #[test]
+    fn consequence_terms_are_ranked_case_insensitively() {
+        // VEP writes NMD_transcript_variant and TFBS_ablation with capitals; the ported
+        // table is lowercase, so an unlowered lookup would score them as unknown.
+        let annotations = vec![
+            "NMD_transcript_variant|GENEA|protein_coding|YES|100/1000",
+            "downstream_gene_variant|GENEB|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("GENEA"));
+    }
+
+    #[test]
+    fn biotype_outranks_severity_when_choosing_a_transcript() {
+        // vcf2maf.pl:871-875 sorts on biotype BEFORE effect. A more severe consequence on a
+        // lncRNA loses to a milder one on a protein_coding transcript.
+        let annotations = vec![
+            "non_coding_transcript_exon_variant|LAMTOR5-AS1|lncRNA|YES|100/1000",
+            "intron_variant|LAMTOR5|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("LAMTOR5"));
+    }
+
+    #[test]
+    fn canonical_isoform_of_the_worst_gene_wins_over_a_worse_noncanonical_one() {
+        // vcf2maf.pl:878-891: pick the worst affected GENE first, then that gene's
+        // CANONICAL=YES isoform — even though the non-canonical isoform is more severe.
+        let annotations = vec![
+            "stop_gained|GENEA|protein_coding||100/1000",
+            "missense_variant|GENEA|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(
+            picked.get("CSQ_Consequence").map(String::as_str),
+            Some("missense_variant")
+        );
+    }
+
+    #[test]
+    fn longest_transcript_breaks_a_biotype_and_severity_tie() {
+        // Third sort key, vcf2maf.pl:874 — Transcript_Length is the cDNA_position
+        // denominator (vcf2maf.pl:862-863), descending.
+        let annotations = vec![
+            "missense_variant|GENEA|protein_coding|YES|10/500",
+            "missense_variant|GENEB|protein_coding|YES|10/5000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("GENEB"));
+    }
+
+    #[test]
+    fn falls_back_to_the_worst_effect_when_no_annotation_has_a_symbol() {
+        // vcf2maf.pl:893 — $all_effects[0] after the sort, when nothing has a SYMBOL.
+        let annotations = vec![
+            "intron_variant||lncRNA||100/1000",
+            "stop_gained||protein_coding||200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(
+            picked.get("CSQ_Consequence").map(String::as_str),
+            Some("stop_gained")
+        );
+    }
 }

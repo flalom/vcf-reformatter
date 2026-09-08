@@ -43,6 +43,103 @@ pub struct MafRecord {
     pub protein_position: Option<String>,
 }
 
+/// vcf2maf's `%biotype_priority` (vcf2maf.pl:144-227), transcribed verbatim. Lower is
+/// better. An unrecognized biotype gets 10, as vcf2maf.pl:228-232 does (it also warns;
+/// we stay silent — a per-variant warning on a 92k-variant file is unusable).
+const BIOTYPE_PRIORITY: &[(&str, u8)] = &[
+    ("protein_coding", 1),
+    ("LRG_gene", 2),
+    ("IG_C_gene", 2),
+    ("IG_D_gene", 2),
+    ("IG_J_gene", 2),
+    ("IG_LV_gene", 2),
+    ("IG_V_gene", 2),
+    ("TR_C_gene", 2),
+    ("TR_D_gene", 2),
+    ("TR_J_gene", 2),
+    ("TR_V_gene", 2),
+    ("miRNA", 3),
+    ("snRNA", 3),
+    ("snoRNA", 3),
+    ("ribozyme", 3),
+    ("tRNA", 3),
+    ("sRNA", 3),
+    ("scaRNA", 3),
+    ("rRNA", 3),
+    ("scRNA", 3),
+    ("lincRNA", 3),
+    ("lncRNA", 3),
+    ("bidirectional_promoter_lncrna", 3),
+    ("bidirectional_promoter_lncRNA", 3),
+    ("known_ncrna", 4),
+    ("vaultRNA", 4),
+    ("vault_RNA", 4),
+    ("macro_lncRNA", 4),
+    ("Mt_tRNA", 4),
+    ("Mt_rRNA", 4),
+    ("antisense", 5),
+    ("antisense_RNA", 5),
+    ("sense_intronic", 5),
+    ("sense_overlapping", 5),
+    ("3prime_overlapping_ncrna", 5),
+    ("3prime_overlapping_ncRNA", 5),
+    ("misc_RNA", 5),
+    ("non_coding", 5),
+    ("regulatory_region", 6),
+    ("disrupted_domain", 6),
+    ("processed_transcript", 6),
+    ("protein_coding_CDS_not_defined", 6),
+    ("TEC", 6),
+    ("TF_binding_site", 7),
+    ("CTCF_binding_site", 7),
+    ("promoter_flanking_region", 7),
+    ("enhancer", 7),
+    ("promoter", 7),
+    ("open_chromatin_region", 7),
+    ("retained_intron", 7),
+    ("nonsense_mediated_decay", 7),
+    ("non_stop_decay", 7),
+    ("ambiguous_orf", 7),
+    ("pseudogene", 8),
+    ("processed_pseudogene", 8),
+    ("polymorphic_pseudogene", 8),
+    ("protein_coding_LoF", 8),
+    ("retrotransposed", 8),
+    ("translated_processed_pseudogene", 8),
+    ("translated_unprocessed_pseudogene", 8),
+    ("transcribed_processed_pseudogene", 8),
+    ("transcribed_unprocessed_pseudogene", 8),
+    ("transcribed_unitary_pseudogene", 8),
+    ("unitary_pseudogene", 8),
+    ("unprocessed_pseudogene", 8),
+    ("Mt_tRNA_pseudogene", 8),
+    ("tRNA_pseudogene", 8),
+    ("snoRNA_pseudogene", 8),
+    ("snRNA_pseudogene", 8),
+    ("scRNA_pseudogene", 8),
+    ("rRNA_pseudogene", 8),
+    ("misc_RNA_pseudogene", 8),
+    ("miRNA_pseudogene", 8),
+    ("IG_pseudogene", 8),
+    ("IG_C_pseudogene", 8),
+    ("IG_D_pseudogene", 8),
+    ("IG_J_pseudogene", 8),
+    ("IG_V_pseudogene", 8),
+    ("TR_J_pseudogene", 8),
+    ("TR_V_pseudogene", 8),
+    ("artifact", 9),
+    ("", 10),
+];
+
+/// Transcript biotype rank. Lower is better; anything unlisted is 10.
+pub fn biotype_priority(biotype: &str) -> u8 {
+    BIOTYPE_PRIORITY
+        .iter()
+        .find(|(name, _)| *name == biotype)
+        .map(|(_, priority)| *priority)
+        .unwrap_or(10)
+}
+
 impl MafRecord {
     /// Convert from ReformattedVcfRecord to MafRecord
     // ponytail: unused by the binary since sample selection landed; the lib's tests are the callers.
@@ -94,13 +191,12 @@ impl MafRecord {
         let (sample_total, sample_ref, sample_alt) =
             Self::extract_depth_for_sample(&record.format_sample_data, tumor);
 
-        // A named sample that is not in this VCF yields nothing at all — falling back to the
-        // pooled INFO counts is the exact confusion the parameter exists to remove.
-        let named_tumor_missing = matches!(tumor, Some(name)
-            if !Self::has_sample(&record.format_sample_data, name));
-
-        let (t_depth, t_ref_count, t_alt_count) = if named_tumor_missing {
-            (None, None, None)
+        // With a tumor named, its columns are the only source, as in vcf2maf. INFO is pooled
+        // over every sample, so falling back to it credits the normal's reads to a tumor that
+        // is absent from the VCF — or present with no call at all (".:.:.:."), which is how
+        // 75 rows of the B487 tumor/normal file reported the normal's depth as the tumor's.
+        let (t_depth, t_ref_count, t_alt_count) = if tumor.is_some() {
+            (sample_total, sample_ref, sample_alt)
         } else {
             (
                 // vcf2maf.pl:936 reads the sample's FORMAT/DP, not INFO/DP, which counts every
@@ -167,8 +263,8 @@ impl MafRecord {
             validation_status: None,
             // Neither is derivable from a VCF; main.rs overwrites them when the user passes
             // --mutation-status / --sequence-source.
-            mutation_status: ".".to_string(),
-            sequence_source: ".".to_string(),
+            mutation_status: String::new(),
+            sequence_source: String::new(),
             sequencer: Self::extract_sequencing_info(&record.info_fields),
             hgvsc,
             hgvsp,
@@ -336,18 +432,13 @@ impl MafRecord {
                 }
             }
 
-            // Per-allele alt count. The tumor sample's AD wins; INFO AO is only a fallback
-            // and pools every sample, so on a tumor/normal VCF it credits the normal's reads
-            // to the tumor. A named sample that is absent gets neither.
-            let allele_alt_count = if matches!(tumor, Some(name)
-                if !Self::has_sample(&record.format_sample_data, name))
-            {
-                None
-            } else {
+            // Per-allele alt count. With a tumor named it comes from that sample's AD only;
+            // INFO AO pools every sample, so on a tumor/normal VCF it credits the normal's
+            // reads to the tumor.
+            let allele_alt_count = if tumor.is_some() {
                 Self::sample_alt_depth_for_allele(&record.format_sample_data, tumor, alt_index)
-                    .or_else(|| {
-                        Self::extract_tumor_depth_for_allele(&record.info_fields, alt_index)
-                    })
+            } else {
+                Self::extract_tumor_depth_for_allele(&record.info_fields, alt_index)
             };
 
             if let Some(allele_depth) = allele_alt_count {
@@ -417,13 +508,6 @@ impl MafRecord {
 
         Self::get_annotation_field(info_fields, &["ANN_Entrez_ID", "CSQ_Gene"])
             .and_then(|id| id.parse().ok())
-    }
-
-    /// True when `name` is one of this record's samples.
-    fn has_sample(format_sample_data: &Option<ParsedFormatSample>, name: &str) -> bool {
-        format_sample_data
-            .as_ref()
-            .is_some_and(|d| d.samples.iter().any(|s| s.sample_name == name))
     }
 
     /// Depth, ref count and alt count from one sample. With `sample` set, only that sample is
@@ -776,7 +860,7 @@ impl MafRecord {
         ("custom", 20),
     ];
 
-    fn effect_priority(term: &str) -> u8 {
+    pub fn effect_priority(term: &str) -> u8 {
         Self::EFFECT_PRIORITY
             .iter()
             .find(|(name, _)| *name == term)
@@ -786,7 +870,7 @@ impl MafRecord {
 
     /// Resolve a (possibly `&`/`,`/`|`-joined) multi-term consequence string down to the
     /// single most severe term, mirroring vcf2maf's sort-by-priority-then-take-first.
-    fn resolve_one_consequence(consequence: &str) -> String {
+    pub fn resolve_one_consequence(consequence: &str) -> String {
         consequence
             .split(&['&', '|', ','][..])
             .map(|s| s.trim())
@@ -1005,7 +1089,10 @@ impl MafRecord {
     }
 
     pub fn to_tsv_line(&self) -> String {
-        let dot = ".";
+        // vcf2maf leaves a cell it has no data for empty. A "." there was our own invention
+        // and the single largest diff class against it. Cells whose "." came from the VCF
+        // itself (FILTER, ID) are untouched — that dot is content, not absence.
+        let empty = "";
         let entrez = self.entrez_gene_id.map(|id| id.to_string());
         let start = self.start_position.to_string();
         let end = self.end_position.to_string();
@@ -1020,7 +1107,7 @@ impl MafRecord {
 
         [
             self.hugo_symbol.as_str(),
-            entrez.as_deref().unwrap_or(dot),
+            entrez.as_deref().unwrap_or(empty),
             self.center.as_str(),
             self.ncbi_build.as_str(),
             self.chromosome.as_str(),
@@ -1032,43 +1119,43 @@ impl MafRecord {
             self.reference_allele.as_str(),
             self.tumor_seq_allele1.as_str(),
             self.tumor_seq_allele2.as_str(),
-            self.dbsnp_rs.as_deref().unwrap_or(dot),
-            self.dbsnp_val_status.as_deref().unwrap_or(dot),
+            self.dbsnp_rs.as_deref().unwrap_or(empty),
+            self.dbsnp_val_status.as_deref().unwrap_or(empty),
             self.tumor_sample_barcode.as_str(),
-            self.matched_norm_sample_barcode.as_deref().unwrap_or(dot),
-            dot, // 18 Match_Norm_Seq_Allele1 — no matched-normal support
-            dot, // 19 Match_Norm_Seq_Allele2
-            dot, // 20 Tumor_Validation_Allele1
-            dot, // 21 Tumor_Validation_Allele2
-            dot, // 22 Match_Norm_Validation_Allele1
-            dot, // 23 Match_Norm_Validation_Allele2
-            dot, // 24 Verification_Status
-            self.validation_status.as_deref().unwrap_or(dot),
+            self.matched_norm_sample_barcode.as_deref().unwrap_or(empty),
+            empty, // 18 Match_Norm_Seq_Allele1 — the normal's GT is not read, only its depths
+            empty, // 19 Match_Norm_Seq_Allele2
+            empty, // 20 Tumor_Validation_Allele1
+            empty, // 21 Tumor_Validation_Allele2
+            empty, // 22 Match_Norm_Validation_Allele1
+            empty, // 23 Match_Norm_Validation_Allele2
+            empty, // 24 Verification_Status
+            self.validation_status.as_deref().unwrap_or(empty),
             self.mutation_status.as_str(),
-            dot, // 27 Sequencing_Phase
+            empty, // 27 Sequencing_Phase
             self.sequence_source.as_str(),
-            dot, // 29 Validation_Method
-            dot, // 30 Score
-            dot, // 31 BAM_File
-            self.sequencer.as_deref().unwrap_or(dot),
-            dot, // 33 Tumor_Sample_UUID
-            dot, // 34 Matched_Norm_Sample_UUID
-            self.hgvsc.as_deref().unwrap_or(dot),
-            self.hgvsp.as_deref().unwrap_or(dot),
-            self.hgvsp_short.as_deref().unwrap_or(dot),
-            self.transcript_id.as_deref().unwrap_or(dot),
-            self.exon_number.as_deref().unwrap_or(dot),
-            t_depth.as_deref().unwrap_or(dot),
-            t_ref_count.as_deref().unwrap_or(dot),
-            t_alt_count.as_deref().unwrap_or(dot),
-            n_depth.as_deref().unwrap_or(dot),
-            n_ref_count.as_deref().unwrap_or(dot),
-            n_alt_count.as_deref().unwrap_or(dot),
-            dot, // 46 all_effects — see Global Constraints: deferred, needs full transcript list
+            empty, // 29 Validation_Method
+            empty, // 30 Score
+            empty, // 31 BAM_File
+            self.sequencer.as_deref().unwrap_or(empty),
+            empty, // 33 Tumor_Sample_UUID
+            empty, // 34 Matched_Norm_Sample_UUID
+            self.hgvsc.as_deref().unwrap_or(empty),
+            self.hgvsp.as_deref().unwrap_or(empty),
+            self.hgvsp_short.as_deref().unwrap_or(empty),
+            self.transcript_id.as_deref().unwrap_or(empty),
+            self.exon_number.as_deref().unwrap_or(empty),
+            t_depth.as_deref().unwrap_or(empty),
+            t_ref_count.as_deref().unwrap_or(empty),
+            t_alt_count.as_deref().unwrap_or(empty),
+            n_depth.as_deref().unwrap_or(empty),
+            n_ref_count.as_deref().unwrap_or(empty),
+            n_alt_count.as_deref().unwrap_or(empty),
+            empty, // 46 all_effects — see Global Constraints: deferred, needs full transcript list
             self.filter_status.as_str(),
-            qual.as_deref().unwrap_or(dot),
-            vaf.as_deref().unwrap_or(dot),
-            self.protein_position.as_deref().unwrap_or(dot),
+            qual.as_deref().unwrap_or(empty),
+            vaf.as_deref().unwrap_or(empty),
+            self.protein_position.as_deref().unwrap_or(empty),
         ]
         .join("\t")
     }
@@ -1179,11 +1266,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unasserted_metadata_columns_default_to_dot() {
+    fn test_unasserted_metadata_columns_default_to_empty() {
         // Nothing in a VCF says the calls are somatic or that the library was an exome.
         let maf = maf_from(100, "A", "G");
-        assert_eq!(maf.mutation_status, ".");
-        assert_eq!(maf.sequence_source, ".");
+        assert_eq!(maf.mutation_status, "");
+        assert_eq!(maf.sequence_source, "");
     }
 
     #[test]
@@ -1653,6 +1740,50 @@ mod tests {
     }
 
     #[test]
+    fn a_tumor_with_no_call_reports_no_depths_rather_than_the_pooled_info() {
+        // freebayes writes ".:.:.:." for a sample it made no call in. INFO DP/RO/AO still
+        // carry the other sample's reads, and falling back to them reported the normal's
+        // depth as the tumor's on 75 rows of B487_1_V_vs_B487_1_cOM. vcf2maf leaves the
+        // whole depth family empty here, and so must we.
+        use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
+        let mut record = create_test_maf_record(
+            "chr1", 21899250, "G", "C", Some(50.0), "PASS",
+            HashMap::from([
+                ("INFO_DP".to_string(), "2".to_string()),
+                ("INFO_RO".to_string(), "0".to_string()),
+                ("INFO_AO".to_string(), "2".to_string()),
+            ]),
+        );
+        record.format_sample_data = Some(ParsedFormatSample {
+            format_keys: vec!["DP".to_string(), "AD".to_string()],
+            samples: vec![
+                ParsedSample {
+                    sample_name: "B487_1_V".to_string(),
+                    format_fields: HashMap::from([
+                        ("DP".to_string(), ".".to_string()),
+                        ("AD".to_string(), ".".to_string()),
+                    ]),
+                },
+                ParsedSample {
+                    sample_name: "B487_1_cOM".to_string(),
+                    format_fields: HashMap::from([
+                        ("DP".to_string(), "2".to_string()),
+                        ("AD".to_string(), "0,2".to_string()),
+                    ]),
+                },
+            ],
+        });
+
+        let maf = MafRecord::from_reformatted_record_for_samples(
+            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+        )
+        .unwrap();
+        assert_eq!(maf.t_depth, None);
+        assert_eq!(maf.t_ref_count, None);
+        assert_eq!(maf.t_alt_count, None);
+    }
+
+    #[test]
     fn tumor_counts_all_come_from_the_tumor_sample_not_pooled_info() {
         // The bug: t_depth was read from the sample while t_ref_count/t_alt_count came from
         // INFO RO/AO, which sum every sample. That produced t_ref + t_alt = 7 against a
@@ -1781,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_tsv_line_fills_unsupported_columns_with_dot() {
+    fn test_to_tsv_line_leaves_unsupported_columns_empty() {
         let record =
             create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", HashMap::new());
         let maf =
@@ -1791,9 +1922,10 @@ mod tests {
         let fields: Vec<&str> = tsv.split('\t').collect();
         assert_eq!(fields.len(), 50);
         // Match_Norm_Seq_Allele1 (idx 17), Verification_Status (idx 23), Score (idx 29),
-        // n_depth (idx 42), all_effects (idx 45) — all always "."
+        // n_depth (idx 42), all_effects (idx 45) — no data source, so empty as vcf2maf
+        // writes them. A "." here was our own invention and the largest diff class.
         for idx in [17, 23, 29, 42, 45] {
-            assert_eq!(fields[idx], ".", "column {idx} should be '.'");
+            assert_eq!(fields[idx], "", "column {idx} should be empty");
         }
     }
 

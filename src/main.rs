@@ -641,9 +641,10 @@ fn main() {
                     // Write parquet output if requested
                     #[cfg(feature = "parquet_out")]
                     if cli.parquet && !records.is_empty() {
-                        let parquet_file = reformatted_file
-                            .replace(".tsv.gz", ".parquet")
-                            .replace(".tsv", ".parquet");
+                        // The text file's own name plus .parquet, so both output formats read
+                        // X_reformatted.<tsv|maf>.parquet. --parquet and --compress are
+                        // mutually exclusive (checked at startup), so there is no .gz case.
+                        let parquet_file = format!("{reformatted_file}.parquet");
                         match parquet_writer::write_tsv_as_parquet(&parquet_file, &_headers, &records) {
                             Ok(()) => println!("✅ Parquet file written: {}", parquet_file),
                             Err(e) => {
@@ -789,9 +790,7 @@ fn main() {
             let write_start = Instant::now();
             #[cfg(feature = "parquet_out")]
             if cli.parquet {
-                let parquet_file = maf_output_file
-                    .replace(".maf.gz", ".maf.parquet")
-                    .replace(".maf", ".maf.parquet");
+                let parquet_file = format!("{maf_output_file}.parquet");
                 match parquet_writer::write_maf_as_parquet(&parquet_file, &maf_records) {
                     Ok(()) => println!("✅ MAF Parquet file written: {}", parquet_file),
                     Err(e) => {
