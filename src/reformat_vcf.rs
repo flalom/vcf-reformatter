@@ -862,6 +862,8 @@ fn generate_headers_from_record(
 /// * `headers` - Column headers for the output
 /// * `records` - Reformatted VCF records to write
 /// * `compress` - Whether to compress output with gzip
+// Superseded by the streaming path; kept because tests/test.rs still exercises it.
+#[allow(dead_code)]
 pub fn write_reformatted_vcf(
     filename: &str,
     headers: &[String],
@@ -894,7 +896,22 @@ fn write_tsv_content<W: Write>(
     headers: &[String],
     records: &[ReformattedVcfRecord],
 ) -> std::io::Result<()> {
-    writeln!(writer, "{}", headers.join("\t"))?;
+    write_tsv_header(writer, headers)?;
+    write_tsv_rows(writer, headers, records)
+}
+
+/// The column line. Streaming writers call this once, before the first batch.
+pub fn write_tsv_header<W: Write>(writer: &mut W, headers: &[String]) -> std::io::Result<()> {
+    writeln!(writer, "{}", headers.join("\t"))
+}
+
+/// Rows only, no column line — so a caller can write one batch at a time and never hold the
+/// whole file. This is the single rendering both the buffered and the streaming path use.
+pub fn write_tsv_rows<W: Write>(
+    writer: &mut W,
+    headers: &[String],
+    records: &[ReformattedVcfRecord],
+) -> std::io::Result<()> {
     let dot = ".";
 
     for record in records {
@@ -954,6 +971,8 @@ fn write_tsv_content<W: Write>(
 
     Ok(())
 }
+// Kept for the library API — `tests/test.rs` exercises it. The binary now streams instead.
+#[allow(dead_code)]
 pub fn write_maf_file(
     filename: &str,
     records: &[MafRecord],
@@ -971,7 +990,51 @@ pub fn write_maf_file(
     Ok(())
 }
 
+/// A MAF file being written a batch at a time, so the caller never has to hold every record.
+/// The header goes out on `create`; `finish` is required for the gzip trailer.
+pub enum MafWriter {
+    Plain(std::io::BufWriter<std::fs::File>),
+    Gz(Box<GzEncoder<std::io::BufWriter<std::fs::File>>>),
+}
+
+impl MafWriter {
+    pub fn create(filename: &str, compress: bool) -> std::io::Result<Self> {
+        let file = std::io::BufWriter::new(std::fs::File::create(filename)?);
+        let mut writer = if compress {
+            MafWriter::Gz(Box::new(GzEncoder::new(file, Compression::default())))
+        } else {
+            MafWriter::Plain(file)
+        };
+        let headers = MafRecord::get_maf_headers();
+        writeln!(writer.inner(), "{}", headers.join("\t"))?;
+        Ok(writer)
+    }
+
+    fn inner(&mut self) -> &mut dyn Write {
+        match self {
+            MafWriter::Plain(w) => w,
+            MafWriter::Gz(w) => w.as_mut(),
+        }
+    }
+
+    pub fn write_rows(&mut self, records: &[MafRecord]) -> std::io::Result<()> {
+        let writer = self.inner();
+        for record in records {
+            writeln!(writer, "{}", record.to_tsv_line())?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> std::io::Result<()> {
+        match self {
+            MafWriter::Plain(mut w) => w.flush(),
+            MafWriter::Gz(w) => w.finish().map(|mut f| f.flush()).and_then(|r| r),
+        }
+    }
+}
+
 // Helper function to write MAF content
+#[allow(dead_code)]
 fn write_maf_content<W: Write>(writer: &mut W, records: &[MafRecord]) -> std::io::Result<()> {
     // Write MAF header
     let headers = MafRecord::get_maf_headers();
@@ -986,6 +1049,8 @@ fn write_maf_content<W: Write>(writer: &mut W, records: &[MafRecord]) -> std::io
 }
 
 /// Process VCF data in chunks to avoid memory exhaustion on large files
+// Superseded by the streaming path; kept because tests/test.rs still exercises it.
+#[allow(dead_code)]
 pub fn reformat_vcf_data_with_header_parallel_chunked(
     header: &str,
     column_names: &str,

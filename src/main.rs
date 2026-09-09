@@ -17,13 +17,9 @@
 //! ```
 use clap::{Parser, ValueEnum};
 use essentials_fields::MafRecord;
-use read_vcf_gz::read_vcf_gz;
 use reformat_vcf::{
     reformat_vcf_data_with_header,
     reformat_vcf_data_with_header_parallel,
-    reformat_vcf_data_with_header_parallel_chunked, // Add this line
-    write_maf_file,
-    write_reformatted_vcf,
     AnnotationType,
     TranscriptHandling,
 };
@@ -360,6 +356,46 @@ fn validate_maf_arguments(cli: &Cli, metadata: &MafMetadata) -> Result<MafConfig
     })
 }
 
+/// Lines pulled from the reader before each parse/convert/write cycle. The knob that decides
+/// peak memory: ~200MB on a dense file at 10k, ~500MB at 25k.
+const STREAM_CHUNK: usize = 10_000;
+
+/// Take up to `n` lines. An empty result means the input is exhausted.
+fn next_chunk(
+    lines: &mut dyn Iterator<Item = std::io::Result<String>>,
+    n: usize,
+) -> std::io::Result<Vec<String>> {
+    let mut chunk = Vec::with_capacity(n);
+    while chunk.len() < n {
+        match lines.next() {
+            Some(line) => chunk.push(line?),
+            None => break,
+        }
+    }
+    Ok(chunk)
+}
+
+fn warn_about_multiallelic(count: usize) {
+    if count > 0 {
+        eprintln!(
+            "⚠️  Warning: {count} multiallelic site(s) detected (ALT field lists more than one allele)."
+        );
+        eprintln!("   Each alternate allele is expanded into its own output record.");
+        eprintln!("   To get one ALT per line instead, normalize first: bcftools norm -m- <input>");
+    }
+}
+
+fn note_multi_transcript(count: usize) {
+    if count > 0 {
+        eprintln!(
+            "ℹ️  Note: {count} site(s) carry more than one transcript annotation; -t first is in use."
+        );
+        eprintln!("   'first' reports the annotation listed first by the annotator, without re-ranking it,");
+        eprintln!("   so at those sites the consequence shown need not be the most damaging one present.");
+        eprintln!("   -t most-severe ranks by consequence severity; -t split keeps every transcript.");
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -398,16 +434,21 @@ fn main() {
     // Read VCF file first to extract metadata
     println!("📖 Reading VCF file...");
     let read_start = Instant::now();
-    let data = match read_vcf_gz(&cli.input_file) {
-        Ok(data) => data,
+    let stream = match read_vcf_gz::open_vcf(&cli.input_file) {
+        Ok(stream) => stream,
         Err(e) => {
             eprintln!("❌ Error reading VCF file: {e}");
             std::process::exit(1);
         }
     };
+    let read_vcf_gz::VcfStream {
+        header,
+        columns_title,
+        mut lines,
+    } = stream;
 
     // Extract metadata from header for MAF
-    let maf_metadata = extract_maf_metadata_from_header(&data.0, &data.1);
+    let maf_metadata = extract_maf_metadata_from_header(&header, &columns_title);
 
     // Validate MAF-specific arguments with auto-detection
     let maf_config = match validate_maf_arguments(&cli, &maf_metadata) {
@@ -439,68 +480,24 @@ fn main() {
     }
 
     // Use the function to tell the user if VEP or SNPEFF were detected
-    if let Err(e) = detect_and_print_annotation_type(&data.0, cli.annotation_type) {
+    if let Err(e) = detect_and_print_annotation_type(&header, cli.annotation_type) {
         eprintln!("❌ {}", e);
         std::process::exit(1);
     }
 
     let read_time = read_start.elapsed();
-    println!("✅ File read completed in {read_time:.2?}");
-    println!("   📊 Total variants: {}", data.2.len());
-    println!("   📑 Header lines: {}", data.0.matches('\n').count());
-
-    let multiallelic_count = summary::count_multiallelic_sites(&data.2);
-    if multiallelic_count > 0 {
-        eprintln!(
-            "⚠️  Warning: {multiallelic_count} multiallelic site(s) detected (ALT field lists more than one allele)."
-        );
-        eprintln!("   Each alternate allele is expanded into its own output record.");
-        eprintln!("   To get one ALT per line instead, normalize first: bcftools norm -m- <input>");
-    }
-
-    if transcript_handling == TranscriptHandling::FirstOnly {
-        let multi_transcript_count = summary::count_multi_transcript_sites(&data.2);
-        if multi_transcript_count > 0 {
-            eprintln!(
-                "ℹ️  Note: {multi_transcript_count} site(s) carry more than one transcript annotation; -t first is in use."
-            );
-            eprintln!("   'first' reports the annotation listed first by the annotator, without re-ranking it,");
-            eprintln!("   so at those sites the consequence shown need not be the most damaging one present.");
-            eprintln!("   -t most-severe ranks by consequence severity; -t split keeps every transcript.");
-        }
-    }
-
-    if cli.verbose && data.2.len() > 50_000 {
-        println!(
-            "   📊 Large dataset detected - processing {} variants in optimized chunks...",
-            data.2.len()
-        );
-    }
-
+    println!("✅ Header read in {read_time:.2?}");
+    println!("   📑 Header lines: {}", header.matches('\n').count());
     println!();
 
     // Branch based on output format
     match cli.output_format {
         OutputFormatCli::Tsv => {
-            // Generate output filenames for TSV
             let (header_file, reformatted_file) = generate_output_filenames(&cli);
 
-            // Write header file
-            println!("📝 Writing header file...");
-            let header_write_start = Instant::now();
-            if let Err(e) = write_header_file(&header_file, &data.0, data.2.len()) {
-                eprintln!("❌ Error writing header file: {e}");
-                std::process::exit(1);
-            }
-            let header_write_time = header_write_start.elapsed();
-            println!("✅ Header file written in {header_write_time:.2?}");
-            println!();
-
-            // Process VCF data for TSV
             println!("🔄 Processing VCF data...");
             let process_start = Instant::now();
 
-            // Create output writer for streaming
             let output_file = match File::create(&reformatted_file) {
                 Ok(file) => file,
                 Err(e) => {
@@ -508,7 +505,6 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-
             let mut writer: Box<dyn Write> = if cli.compress {
                 Box::new(BufWriter::new(GzEncoder::new(
                     output_file,
@@ -518,281 +514,377 @@ fn main() {
                 Box::new(BufWriter::new(output_file))
             };
 
-            let result = if use_parallel {
-                if cli.verbose {
+            if cli.verbose {
+                if use_parallel {
                     println!("   🚀 Using parallel processing with {thread_count} threads...");
-                }
-
-                // Use smart threshold logic that accounts for transcript expansion
-                let estimated_output_records =
-                    if transcript_handling == TranscriptHandling::SplitRows {
-                        // With split transcripts, estimate 10x expansion for typical VEP/SnpEff data
-                        data.2.len() * 10
-                    } else {
-                        // FirstOnly or MostSevere produce 1:1 record mapping
-                        data.2.len()
-                    };
-
-                // Use chunked processing if:
-                // 1. Large input (>100K variants) OR
-                // 2. Large estimated output (>500K records)
-                // ponytail: --parquet opts out — the parquet writer needs every record in
-                // memory at once, and chunked processing streams them straight to the TSV
-                // and hands back an empty Vec, which silently produced no parquet file.
-                let stream_chunked =
-                    (data.2.len() > 100_000 || estimated_output_records > 500_000) && !cli.parquet;
-                if !stream_chunked && cli.parquet && estimated_output_records > 500_000 {
-                    eprintln!(
-                        "⚠️  Note: --parquet holds all {estimated_output_records} estimated records in memory (chunked streaming cannot produce parquet)."
-                    );
-                }
-                if stream_chunked {
-                    if cli.verbose {
-                        if estimated_output_records > data.2.len() {
-                            println!("   📦 Large output expected ({} estimated records) - using chunked processing to prevent memory issues", estimated_output_records);
-                        } else {
-                            println!("   📦 Large dataset detected ({} variants) - using chunked processing to prevent memory issues", data.2.len());
-                        }
-                    }
-
-                    // Use streaming chunked function
-                    reformat_vcf_data_with_header_parallel_chunked(
-                        &data.0,
-                        &data.1,
-                        &data.2,
-                        transcript_handling,
-                        &mut *writer,
-                    )
-                    .map(|headers| {
-                        // Flush and close writer
-                        writer.flush().expect("Failed to flush writer");
-                        drop(writer);
-                        (headers, Vec::new()) // Return empty records since we streamed them
-                    })
                 } else {
-                    // Use regular parallel function for small files
-                    let result = reformat_vcf_data_with_header_parallel(
-                        &data.0,
-                        &data.1,
-                        &data.2,
-                        transcript_handling,
-                    );
-
-                    // Write results using traditional method for small files
-                    if let Ok((headers, records)) = &result {
-                        // Drop the streaming writer
-                        drop(writer);
-                        // Use the existing write function for small files
-                        if let Err(e) =
-                            write_reformatted_vcf(&reformatted_file, headers, records, cli.compress)
-                        {
-                            eprintln!("❌ Error writing file: {e}");
-                            std::process::exit(1);
-                        }
-                    }
-                    result
-                }
-            } else {
-                if cli.verbose {
                     println!("   🐌 Using sequential processing...");
                 }
-                let result =
-                    reformat_vcf_data_with_header(&data.0, &data.1, &data.2, transcript_handling);
+            }
 
-                // Write results using traditional method for sequential processing
-                if let Ok((headers, records)) = &result {
-                    drop(writer);
-                    if let Err(e) =
-                        write_reformatted_vcf(&reformatted_file, headers, records, cli.compress)
-                    {
+            let mut input_variants = 0usize;
+            let mut output_record_count = 0usize;
+            let mut input_chrom_counts: indexmap::IndexMap<String, usize> =
+                indexmap::IndexMap::new();
+            let mut output_chrom_counts: indexmap::IndexMap<String, usize> =
+                indexmap::IndexMap::new();
+            let mut damage_breakdowns: Vec<summary::DamageBreakdown> = Vec::new();
+            let mut multiallelic_count = 0usize;
+            let mut multi_transcript_count = 0usize;
+            let mut progress_marks = 0usize;
+            // Columns come from the first record, exactly as the buffered path always has.
+            let mut headers: Vec<String> = Vec::new();
+            // Parquet is written a chunk at a time too; the sink opens once the first
+            // chunk has settled the column list.
+            #[cfg(feature = "parquet_out")]
+            let parquet_file = format!("{reformatted_file}.parquet");
+            #[cfg(feature = "parquet_out")]
+            let mut parquet_sink: Option<parquet_writer::ParquetSink> = None;
+
+            loop {
+                let chunk = match next_chunk(lines.as_mut(), STREAM_CHUNK) {
+                    Ok(chunk) => chunk,
+                    Err(e) => {
+                        eprintln!("❌ Error reading VCF file: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                input_variants += chunk.len();
+                for line in &chunk {
+                    if let Some(chrom) = line.split('\t').next() {
+                        *input_chrom_counts.entry(chrom.to_string()).or_insert(0) += 1;
+                    }
+                }
+
+                let chunk_multiallelic = summary::count_multiallelic_sites(&chunk);
+                if chunk_multiallelic > 0 && multiallelic_count == 0 {
+                    warn_about_multiallelic(chunk_multiallelic);
+                }
+                multiallelic_count += chunk_multiallelic;
+                if transcript_handling == TranscriptHandling::FirstOnly {
+                    let chunk_multi_transcript = summary::count_multi_transcript_sites(&chunk);
+                    if chunk_multi_transcript > 0 && multi_transcript_count == 0 {
+                        note_multi_transcript(chunk_multi_transcript);
+                    }
+                    multi_transcript_count += chunk_multi_transcript;
+                }
+
+                let converted = if use_parallel {
+                    reformat_vcf_data_with_header_parallel(
+                        &header,
+                        &columns_title,
+                        &chunk,
+                        transcript_handling,
+                    )
+                } else {
+                    reformat_vcf_data_with_header(
+                        &header,
+                        &columns_title,
+                        &chunk,
+                        transcript_handling,
+                    )
+                };
+                let (chunk_headers, records) = match converted {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("❌ Error reformatting VCF data: {e}");
+                        std::process::exit(1);
+                    }
+                };
+
+                if headers.is_empty() && !records.is_empty() {
+                    headers = chunk_headers;
+                    if let Err(e) = reformat_vcf::write_tsv_header(&mut writer, &headers) {
                         eprintln!("❌ Error writing file: {e}");
                         std::process::exit(1);
                     }
                 }
-                result
-            };
+                if let Err(e) = reformat_vcf::write_tsv_rows(&mut writer, &headers, &records) {
+                    eprintln!("❌ Error writing file: {e}");
+                    std::process::exit(1);
+                }
 
-            match result {
-                Ok((_headers, records)) => {
-                    let process_time = process_start.elapsed();
-                    let variants_per_sec = data.2.len() as f64 / process_time.as_secs_f64();
-                    println!("✅ Data processing completed in {process_time:.2?}");
-                    println!("   📈 Processing rate: {variants_per_sec:.0} variants/sec");
-
-                    // For large files (streamed), records will be empty
-                    if records.is_empty() && data.2.len() > 100_000 {
-                        println!("   📊 Output: Streamed directly to file (memory-efficient)");
-                    } else {
-                        println!(
-                            "   📊 Output records: {} ({:.2}x expansion)",
-                            records.len(),
-                            records.len() as f64 / data.2.len() as f64
-                        );
-                    }
-
-                    if use_parallel {
-                        println!(
-                            "   🚀 Parallel efficiency: {:.1}x speedup potential",
-                            thread_count as f64
-                        );
-                    }
-                    println!();
-
-                    // Write parquet output if requested
-                    #[cfg(feature = "parquet_out")]
-                    if cli.parquet && !records.is_empty() {
-                        // The text file's own name plus .parquet, so both output formats read
-                        // X_reformatted.<tsv|maf>.parquet. --parquet and --compress are
-                        // mutually exclusive (checked at startup), so there is no .gz case.
-                        let parquet_file = format!("{reformatted_file}.parquet");
-                        match parquet_writer::write_tsv_as_parquet(&parquet_file, &_headers, &records) {
-                            Ok(()) => println!("✅ Parquet file written: {}", parquet_file),
+                output_record_count += records.len();
+                for record in &records {
+                    *output_chrom_counts
+                        .entry(record.chromosome.clone())
+                        .or_insert(0) += 1;
+                }
+                if cli.report == ReportFormatCli::Html {
+                    summary::merge_damage_breakdowns(
+                        &mut damage_breakdowns,
+                        summary::compute_damage_breakdowns(&records),
+                    );
+                }
+                #[cfg(feature = "parquet_out")]
+                if cli.parquet && !headers.is_empty() {
+                    let sink = match parquet_sink.as_mut() {
+                        Some(sink) => sink,
+                        None => match parquet_writer::ParquetSink::create_tsv(
+                            &parquet_file,
+                            &headers,
+                        ) {
+                            Ok(sink) => parquet_sink.insert(sink),
                             Err(e) => {
                                 eprintln!("❌ Error writing parquet file: {e}");
                                 std::process::exit(1);
                             }
-                        }
-                    }
-
-                    // Write summary if requested
-                    if !records.is_empty() {
-                        let mut output_chrom_counts = indexmap::IndexMap::new();
-                        for r in &records {
-                            *output_chrom_counts.entry(r.chromosome.clone()).or_insert(0usize) += 1;
-                        }
-                        write_summary_if_requested(
-                            &cli,
-                            &data.2,
-                            records.len(),
-                            output_chrom_counts,
-                            process_time.as_secs_f64(),
-                            variants_per_sec,
-                            summary::compute_damage_breakdowns(&records),
-                        );
-                    } else if data.2.len() > 100_000 && cli.report != ReportFormatCli::None {
-                        eprintln!("⚠️  Report skipped: dataset was streamed in chunks (memory-efficient mode for large files)");
-                    }
-
-                    // Writing is streamed inline with processing above, so it has
-                    // no separately measurable duration.
-                    let write_time = None;
-                    let total_time = total_start.elapsed();
-                    println!(
-                        "✅ Output file ready: {}{}",
-                        reformatted_file,
-                        if cli.compress { " (compressed)" } else { "" }
-                    );
-                    println!();
-
-                    // Print final summary - create the structs with correct data
-                    let timing = ProcessingTiming {
-                        read_time,
-                        process_time,
-                        write_time,
-                        header_write_time: Some(header_write_time),
-                        total_time,
+                        },
                     };
-
-                    let stats = ProcessingStats {
-                        variants_per_sec,
-                        thread_count,
-                        use_parallel,
-                    };
-
-                    print_final_summary(
-                        &cli,
-                        &header_file,
-                        &reformatted_file,
-                        &data,
-                        &records,
-                        &timing,
-                        &stats,
-                    );
+                    if let Err(e) = sink.write_tsv(&records) {
+                        eprintln!("❌ Error writing parquet file: {e}");
+                        std::process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("❌ Error reformatting VCF data: {e}");
-                    std::process::exit(1);
+
+                if input_variants / 200_000 > progress_marks {
+                    progress_marks = input_variants / 200_000;
+                    println!("   … {input_variants} variants processed");
                 }
             }
-        }
-        OutputFormatCli::Maf => {
-            // Process VCF data for MAF
-            println!("🔄 Processing VCF data for MAF format...");
 
-            if data.2.len() > 1_000_000 {
-                println!("⚠️  WARNING: Large file with MAF output detected!");
-                println!("   📁 File size: {} variants", data.2.len());
-                println!(
-                    "   💾 Estimated memory: ~{} GB",
-                    (data.2.len() as f64 * 6.0 / 1_000_000.0) as u32
-                );
-                println!("   💡 Consider using TSV format for better memory efficiency:");
-                println!(
-                    "      vcf-reformatter {} -j {} -c -v",
-                    cli.input_file, cli.threads
-                );
-                println!("   🤔 Continue with MAF anyway? This may cause out-of-memory errors.");
-                println!();
+            if let Err(e) = writer.flush() {
+                eprintln!("❌ Error writing file: {e}");
+                std::process::exit(1);
             }
-
-            let process_start = Instant::now();
-
-            // Create MafConversionParams struct
-            let params = MafConversionParams {
-                header: &data.0,
-                columns_title: &data.1,
-                data_lines: &data.2,
-                center: &maf_config.center,
-                ncbi_build: &maf_config.ncbi_build,
-                sample_barcode: &maf_config.sample_barcode,
-                tumor_id: cli.tumor_id.as_deref(),
-                normal_id: cli.normal_id.as_deref(),
-                transcript_handling,
-                verbose: cli.verbose,
-                use_parallel,
-                compute_damage: cli.report == ReportFormatCli::Html,
-            };
-
-            // Convert to MAF records using the fixed function
-            let (mut maf_records, damage_breakdowns) = match convert_to_maf_records(&params) {
-                Ok(result) => result,
-                Err(e) => {
-                    eprintln!("❌ Error converting to MAF: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            // Study metadata no VCF carries; "." unless the user states it.
-            for record in &mut maf_records {
-                if let Some(status) = &cli.mutation_status {
-                    record.mutation_status = status.clone();
-                }
-                if let Some(source) = &cli.sequence_source {
-                    record.sequence_source = source.clone();
-                }
-            }
-            let maf_records = maf_records;
+            drop(writer);
 
             let process_time = process_start.elapsed();
-            let variants_per_sec = data.2.len() as f64 / process_time.as_secs_f64();
-            println!("✅ MAF processing completed in {process_time:.2?}");
+            let variants_per_sec = input_variants as f64 / process_time.as_secs_f64();
+            println!("✅ Data processing completed in {process_time:.2?}");
+            println!("   📊 Total variants: {input_variants}");
             println!("   📈 Processing rate: {variants_per_sec:.0} variants/sec");
             println!(
-                "   📊 MAF records: {} ({:.2}x expansion)",
-                maf_records.len(),
-                maf_records.len() as f64 / data.2.len() as f64
+                "   📊 Output records: {} ({:.2}x expansion)",
+                output_record_count,
+                output_record_count as f64 / input_variants.max(1) as f64
+            );
+            if use_parallel {
+                println!(
+                    "   🚀 Parallel efficiency: {:.1}x speedup potential",
+                    thread_count as f64
+                );
+            }
+            println!();
+
+            // The header file records the variant count, so it is written once that count is
+            // known — which, streaming, is after the data rather than before it.
+            println!("📝 Writing header file...");
+            let header_write_start = Instant::now();
+            if let Err(e) = write_header_file(&header_file, &header, input_variants) {
+                eprintln!("❌ Error writing header file: {e}");
+                std::process::exit(1);
+            }
+            let header_write_time = header_write_start.elapsed();
+            println!("✅ Header file written in {header_write_time:.2?}");
+            println!();
+
+            // The text file's own name plus .parquet, so both output formats read
+            // X_reformatted.<tsv|maf>.parquet. --parquet and --compress are mutually
+            // exclusive (checked at startup), so there is no .gz case.
+            #[cfg(feature = "parquet_out")]
+            if let Some(sink) = parquet_sink.take() {
+                match sink.close() {
+                    Ok(()) => println!("✅ Parquet file written: {}", parquet_file),
+                    Err(e) => {
+                        eprintln!("❌ Error writing parquet file: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            write_summary_from_counts(
+                &cli,
+                input_variants,
+                input_chrom_counts,
+                output_record_count,
+                output_chrom_counts,
+                process_time.as_secs_f64(),
+                variants_per_sec,
+                damage_breakdowns,
+            );
+
+            let total_time = total_start.elapsed();
+            println!(
+                "✅ Output file ready: {}{}",
+                reformatted_file,
+                if cli.compress { " (compressed)" } else { "" }
             );
             println!();
 
-            // Generate MAF output filename
-            let maf_output_file = generate_maf_output_filename(&cli);
+            let timing = ProcessingTiming {
+                read_time,
+                process_time,
+                write_time: None,
+                header_write_time: Some(header_write_time),
+                total_time,
+            };
+            let stats = ProcessingStats {
+                variants_per_sec,
+                thread_count,
+                use_parallel,
+            };
 
-            // Write MAF file (parquet or text)
-            let write_start = Instant::now();
+            print_final_summary(
+                &cli,
+                &header_file,
+                &reformatted_file,
+                input_variants,
+                output_record_count,
+                &timing,
+                &stats,
+            );
+        }
+        OutputFormatCli::Maf => {
+            println!("🔄 Processing VCF data for MAF format...");
+            let maf_output_file = generate_maf_output_filename(&cli);
+            let process_start = Instant::now();
+
+            let mut writer = match reformat_vcf::MafWriter::create(&maf_output_file, cli.compress) {
+                Ok(writer) => writer,
+                Err(e) => {
+                    eprintln!("❌ Error writing MAF file: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let mut input_variants = 0usize;
+            let mut maf_record_count = 0usize;
+            let mut input_chrom_counts: indexmap::IndexMap<String, usize> =
+                indexmap::IndexMap::new();
+            let mut output_chrom_counts: indexmap::IndexMap<String, usize> =
+                indexmap::IndexMap::new();
+            let mut damage_breakdowns: Vec<summary::DamageBreakdown> = Vec::new();
+            let mut multiallelic_count = 0usize;
+            let mut multi_transcript_count = 0usize;
+            let mut progress_marks = 0usize;
             #[cfg(feature = "parquet_out")]
-            if cli.parquet {
-                let parquet_file = format!("{maf_output_file}.parquet");
-                match parquet_writer::write_maf_as_parquet(&parquet_file, &maf_records) {
+            let parquet_file = format!("{maf_output_file}.parquet");
+            #[cfg(feature = "parquet_out")]
+            let mut parquet_sink = if cli.parquet {
+                match parquet_writer::ParquetSink::create_maf(&parquet_file) {
+                    Ok(sink) => Some(sink),
+                    Err(e) => {
+                        eprintln!("❌ Error writing MAF parquet file: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
+
+            loop {
+                let chunk = match next_chunk(lines.as_mut(), STREAM_CHUNK) {
+                    Ok(chunk) => chunk,
+                    Err(e) => {
+                        eprintln!("❌ Error reading VCF file: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                input_variants += chunk.len();
+                for line in &chunk {
+                    if let Some(chrom) = line.split('\t').next() {
+                        *input_chrom_counts.entry(chrom.to_string()).or_insert(0) += 1;
+                    }
+                }
+
+                // Warn the first time one is seen rather than after a whole extra pass over
+                // the file; the totals go out with the final summary.
+                let chunk_multiallelic = summary::count_multiallelic_sites(&chunk);
+                if chunk_multiallelic > 0 && multiallelic_count == 0 {
+                    warn_about_multiallelic(chunk_multiallelic);
+                }
+                multiallelic_count += chunk_multiallelic;
+                if transcript_handling == TranscriptHandling::FirstOnly {
+                    let chunk_multi_transcript = summary::count_multi_transcript_sites(&chunk);
+                    if chunk_multi_transcript > 0 && multi_transcript_count == 0 {
+                        note_multi_transcript(chunk_multi_transcript);
+                    }
+                    multi_transcript_count += chunk_multi_transcript;
+                }
+
+                let params = MafConversionParams {
+                    header: &header,
+                    columns_title: &columns_title,
+                    data_lines: &chunk,
+                    center: &maf_config.center,
+                    ncbi_build: &maf_config.ncbi_build,
+                    sample_barcode: &maf_config.sample_barcode,
+                    tumor_id: cli.tumor_id.as_deref(),
+                    normal_id: cli.normal_id.as_deref(),
+                    transcript_handling,
+                    verbose: cli.verbose && input_variants <= STREAM_CHUNK,
+                    use_parallel,
+                    compute_damage: cli.report == ReportFormatCli::Html,
+                };
+                let (mut records, breakdowns) = match convert_to_maf_records(&params) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("❌ Error converting to MAF: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                summary::merge_damage_breakdowns(&mut damage_breakdowns, breakdowns);
+
+                // Study metadata no VCF carries; "." unless the user states it.
+                for record in &mut records {
+                    if let Some(status) = &cli.mutation_status {
+                        record.mutation_status = status.clone();
+                    }
+                    if let Some(source) = &cli.sequence_source {
+                        record.sequence_source = source.clone();
+                    }
+                    *output_chrom_counts
+                        .entry(record.chromosome.clone())
+                        .or_insert(0) += 1;
+                }
+                maf_record_count += records.len();
+
+                if let Err(e) = writer.write_rows(&records) {
+                    eprintln!("❌ Error writing MAF file: {e}");
+                    std::process::exit(1);
+                }
+                #[cfg(feature = "parquet_out")]
+                if let Some(sink) = parquet_sink.as_mut() {
+                    if let Err(e) = sink.write_maf(&records) {
+                        eprintln!("❌ Error writing MAF parquet file: {e}");
+                        std::process::exit(1);
+                    }
+                }
+
+                // With streaming the total is unknowable, so report what has been done.
+                if input_variants / 200_000 > progress_marks {
+                    progress_marks = input_variants / 200_000;
+                    println!("   … {input_variants} variants processed");
+                }
+            }
+
+            if let Err(e) = writer.finish() {
+                eprintln!("❌ Error writing MAF file: {e}");
+                std::process::exit(1);
+            }
+
+            let process_time = process_start.elapsed();
+            let variants_per_sec = input_variants as f64 / process_time.as_secs_f64();
+            println!("✅ MAF processing completed in {process_time:.2?}");
+            println!("   📊 Total variants: {input_variants}");
+            println!("   📈 Processing rate: {variants_per_sec:.0} variants/sec");
+            println!(
+                "   📊 MAF records: {} ({:.2}x expansion)",
+                maf_record_count,
+                maf_record_count as f64 / input_variants.max(1) as f64
+            );
+            println!();
+
+            #[cfg(feature = "parquet_out")]
+            if let Some(sink) = parquet_sink.take() {
+                match sink.close() {
                     Ok(()) => println!("✅ MAF Parquet file written: {}", parquet_file),
                     Err(e) => {
                         eprintln!("❌ Error writing MAF parquet file: {e}");
@@ -801,58 +893,35 @@ fn main() {
                 }
             }
 
-            // ponytail: --parquet writes *in addition to* the text file, on both the MAF and
-            // the TSV path. Same contract everywhere; nothing to remember.
-            println!(
-                "💾 Writing MAF file{}...",
-                if cli.compress { " (compressed)" } else { "" }
+            write_summary_from_counts(
+                &cli,
+                input_variants,
+                input_chrom_counts,
+                maf_record_count,
+                output_chrom_counts,
+                process_time.as_secs_f64(),
+                variants_per_sec,
+                damage_breakdowns,
             );
-            if let Err(e) = write_maf_file(&maf_output_file, &maf_records, cli.compress) {
-                eprintln!("❌ Error writing MAF file: {e}");
-                std::process::exit(1);
-            }
-            let write_time = write_start.elapsed();
 
-            // Write summary if requested
-            {
-                let mut output_chrom_counts = indexmap::IndexMap::new();
-                for r in &maf_records {
-                    *output_chrom_counts.entry(r.chromosome.clone()).or_insert(0usize) += 1;
-                }
-                write_summary_if_requested(
-                    &cli,
-                    &data.2,
-                    maf_records.len(),
-                    output_chrom_counts,
-                    process_time.as_secs_f64(),
-                    variants_per_sec,
-                    damage_breakdowns,
-                );
-            }
             let total_time = total_start.elapsed();
-            println!(
-                "✅ MAF file written in {:.2?}{}",
-                write_time,
-                if cli.compress { " (compressed)" } else { "" }
-            );
+            println!("✅ MAF file written{}", if cli.compress { " (compressed)" } else { "" });
             println!();
 
-            // Print MAF summary - create the structs with correct data
             let timing = ProcessingTiming {
                 read_time,
                 process_time,
-                write_time: Some(write_time),
+                write_time: None,
                 header_write_time: None,
                 total_time,
             };
-
             let stats = ProcessingStats {
                 variants_per_sec,
                 thread_count,
                 use_parallel,
             };
 
-            print_maf_summary(&cli, &maf_output_file, &maf_records, &timing, &stats);
+            print_maf_summary(&cli, &maf_output_file, maf_record_count, &timing, &stats);
         }
     }
 }
@@ -892,7 +961,7 @@ fn generate_maf_output_filename(cli: &Cli) -> String {
 fn print_maf_summary(
     cli: &Cli,
     maf_file: &str,
-    maf_records: &[MafRecord],
+    maf_record_count: usize,
     timing: &ProcessingTiming,
     stats: &ProcessingStats,
 ) {
@@ -916,7 +985,7 @@ fn print_maf_summary(
         "🚀 Processing rate:  {:.0} variants/sec",
         stats.variants_per_sec
     );
-    println!("📊 MAF records:      {}", maf_records.len());
+    println!("📊 MAF records:      {maf_record_count}");
     if stats.use_parallel {
         println!("🧵 Threads used:     {}", stats.thread_count);
     }
@@ -995,9 +1064,13 @@ fn generate_summary_filename(cli: &Cli, extension: &str) -> String {
     output_path(cli, "_summary", extension)
 }
 
-fn write_summary_if_requested(
+/// The same report, built from counters instead of the retained input lines — which is what a
+/// streaming path has. `write_summary_if_requested` is the collect-everything caller.
+#[allow(clippy::too_many_arguments)]
+fn write_summary_from_counts(
     cli: &Cli,
-    data_lines: &[String],
+    input_variant_count: usize,
+    input_chrom_counts: indexmap::IndexMap<String, usize>,
     output_record_count: usize,
     output_chrom_counts: indexmap::IndexMap<String, usize>,
     process_time_secs: f64,
@@ -1007,7 +1080,7 @@ fn write_summary_if_requested(
     if cli.report == ReportFormatCli::None {
         return;
     }
-    let input_chrom_counts = summary::count_input_chromosomes(data_lines);
+    let input_chrom_counts = summary::sort_chromosomes(input_chrom_counts);
     let output_chrom_counts = summary::sort_chromosomes(output_chrom_counts);
 
     let output_format = match cli.output_format {
@@ -1024,7 +1097,7 @@ fn write_summary_if_requested(
         input_file: cli.input_file.clone(),
         output_format: output_format.to_string(),
         transcript_handling: transcript_mode.to_string(),
-        input_variant_count: data_lines.len(),
+        input_variant_count,
         output_record_count,
         input_chrom_counts,
         output_chrom_counts,
@@ -1066,12 +1139,13 @@ fn write_header_file(filename: &str, header: &str, variant_count: usize) -> std:
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_final_summary(
     cli: &Cli,
     header_file: &str,
     reformatted_file: &str,
-    data: &(String, String, Vec<String>),
-    records: &[reformat_vcf::ReformattedVcfRecord],
+    input_variant_count: usize,
+    output_record_count: usize,
     timing: &ProcessingTiming,
     stats: &ProcessingStats,
 ) {
@@ -1099,8 +1173,8 @@ fn print_final_summary(
         "🚀 Processing rate:  {:.0} variants/sec",
         stats.variants_per_sec
     );
-    println!("📊 Input variants:   {}", data.2.len());
-    println!("📊 Output records:   {}", records.len());
+    println!("📊 Input variants:   {input_variant_count}");
+    println!("📊 Output records:   {output_record_count}");
     if stats.use_parallel {
         println!("🧵 Threads used:     {}", stats.thread_count);
     }

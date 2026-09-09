@@ -94,6 +94,8 @@ pub fn count_multi_transcript_sites(data_lines: &[String]) -> usize {
 
 /// Count variants per chromosome from raw VCF data lines.
 /// Each line starts with the chromosome name followed by a tab.
+// Superseded by the streaming path; kept because tests/test.rs still exercises it.
+#[allow(dead_code)]
 pub fn count_input_chromosomes(data_lines: &[String]) -> IndexMap<String, usize> {
     let mut counts = IndexMap::new();
     for line in data_lines {

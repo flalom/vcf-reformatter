@@ -2,9 +2,19 @@ use flate2::read::MultiGzDecoder;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 
-pub fn read_vcf_gz(
-    file_path: &str,
-) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
+/// A VCF opened for reading: header and column line in hand, data lines still to come.
+///
+/// The data lines are an iterator, not a `Vec`, so a caller can process the file in chunks and
+/// never hold it whole. `read_vcf_gz` keeps the old collect-everything behaviour for callers
+/// that have not been converted yet.
+pub struct VcfStream {
+    pub header: String,
+    pub columns_title: String,
+    pub lines: Box<dyn Iterator<Item = io::Result<String>>>,
+}
+
+/// Open a VCF (plain, gzipped, or `-` for stdin) and read only as far as the `#CHROM` line.
+pub fn open_vcf(file_path: &str) -> Result<VcfStream, Box<dyn std::error::Error>> {
     let reader: Box<dyn BufRead> = if file_path == "-" {
         println!("Reading VCF from stdin");
         sniff_gzip_reader(io::stdin())?
@@ -19,7 +29,25 @@ pub fn read_vcf_gz(
         }
     };
 
-    parse_vcf_reader(reader)
+    split_header(reader)
+}
+
+// Kept for the library API — `tests/test.rs` exercises it. The binary now streams instead.
+#[allow(dead_code)]
+pub fn read_vcf_gz(
+    file_path: &str,
+) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
+    let stream = open_vcf(file_path)?;
+    let data_lines = stream.lines.collect::<io::Result<Vec<String>>>()?;
+
+    println!(
+        "Total lines read: {}",
+        stream.header.matches('\n').count() + 1 + data_lines.len()
+    );
+    println!("Header lines: {}", stream.header.matches('\n').count());
+    println!("Data lines: {}", data_lines.len());
+
+    Ok((stream.header, stream.columns_title, data_lines))
 }
 
 /// Peek the first two bytes of `source` to detect the gzip magic number
@@ -37,32 +65,26 @@ fn sniff_gzip_reader<R: Read + 'static>(mut source: R) -> io::Result<Box<dyn Buf
     }
 }
 
-fn parse_vcf_reader(
-    reader: Box<dyn BufRead>,
-) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
+/// Consume the `##` lines and the `#CHROM` line, leaving the data lines unread.
+fn split_header(mut reader: Box<dyn BufRead>) -> Result<VcfStream, Box<dyn std::error::Error>> {
     let mut header = String::new();
-    let mut data_lines = Vec::new();
-    let mut line_count = 0;
     let mut columns_title = String::new();
+    let mut line = String::new();
+    let mut lines_read = 0usize;
 
-    for line in reader.lines() {
-        match line {
-            Ok(line_content) => {
-                line_count += 1;
-
-                if line_content.starts_with("##") {
-                    header.push_str(&line_content);
-                    header.push('\n');
-                } else if line_content.starts_with("#CHROM") {
-                    columns_title = line_content.clone();
-                } else if !line_content.trim().is_empty() {
-                    data_lines.push(line_content);
-                }
-            }
-            Err(e) => {
-                println!("Error reading line {}: {}", line_count + 1, e);
-                return Err(e.into());
-            }
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        lines_read += 1;
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.starts_with("##") {
+            header.push_str(trimmed);
+            header.push('\n');
+        } else if trimmed.starts_with("#CHROM") {
+            columns_title = trimmed.to_string();
+            break;
         }
     }
 
@@ -71,21 +93,35 @@ fn parse_vcf_reader(
     // than failing. A real VCF carrying zero variants still has the line, and still succeeds.
     if columns_title.is_empty() {
         return Err(format!(
-            "no #CHROM header line found after {line_count} line(s) — is this a VCF?"
+            "no #CHROM header line found after {lines_read} line(s) — is this a VCF?"
         )
         .into());
     }
 
-    println!("Total lines read: {line_count}");
-    println!("Header lines: {}", header.matches('\n').count());
-    println!("Data lines: {}", data_lines.len());
+    let lines = reader.lines().filter(|line| match line {
+        Ok(text) => !text.trim().is_empty() && !text.starts_with('#'),
+        Err(_) => true,
+    });
 
-    Ok((header, columns_title, data_lines))
+    Ok(VcfStream {
+        header,
+        columns_title,
+        lines: Box::new(lines),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The old collect-everything entry point, kept for the tests that predate `VcfStream`.
+    fn parse_vcf_reader(
+        reader: Box<dyn BufRead>,
+    ) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
+        let stream = split_header(reader)?;
+        let data = stream.lines.collect::<io::Result<Vec<String>>>()?;
+        Ok((stream.header, stream.columns_title, data))
+    }
 
     fn plain_vcf() -> &'static str {
         "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t100\t.\tA\tG\t60\tPASS\tDP=10\n"
