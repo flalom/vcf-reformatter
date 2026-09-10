@@ -350,6 +350,17 @@ impl MafRecord {
             .unwrap_or_else(|| "Unknown".to_string())
     }
 
+    /// A VCF ALT that is not a literal base sequence: a symbolic allele (`<DEL>`, `<NON_REF>`,
+    /// `<*>`) or a breakend (`A[chr2:456[`, `]chr2:456]A`). No MAF column can hold one — before
+    /// 2026-09-09 `<DEL>` came out typed `INS`, an insertion of the five characters `<DEL>` —
+    /// so such an allele produces no MAF row at all. The TSV path still carries it verbatim.
+    ///
+    /// `*` (spanning deletion) is deliberately **not** included: vcf2maf drops those lines and
+    /// we keep them, user's call 2026-09-09.
+    pub fn is_symbolic_allele(alt: &str) -> bool {
+        alt.starts_with('<') || alt.contains('[') || alt.contains(']')
+    }
+
     /// Handle multi-allelic variants by creating separate MafRecord for each alternate allele
     #[allow(dead_code)]
     pub fn from_reformatted_record_multi(
@@ -377,6 +388,12 @@ impl MafRecord {
         let mut maf_records = Vec::new();
 
         for (alt_index, alternate) in alternates.iter().enumerate() {
+            // A structural or non-base ALT has no honest MAF representation; skip it rather
+            // than type it as an insertion of its own literal text.
+            if Self::is_symbolic_allele(alternate) {
+                continue;
+            }
+
             // The annotation we kept belongs to one specific allele. On a multiallelic line,
             // carrying it onto the other ALTs would report a gene and consequence for an allele
             // the annotator never described, so those rows go out unannotated instead.
@@ -1163,6 +1180,17 @@ impl MafRecord {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_is_symbolic_allele() {
+        for alt in ["<DEL>", "<NON_REF>", "<*>", "A[chr2:456[", "]chr2:456]A"] {
+            assert!(MafRecord::is_symbolic_allele(alt), "{alt} is not a base sequence");
+        }
+        // `*` is a spanning deletion, not a symbolic allele: those rows are kept on purpose.
+        for alt in ["A", "ACGT", "-", "*"] {
+            assert!(!MafRecord::is_symbolic_allele(alt), "{alt} must still convert");
+        }
+    }
+
     use super::*;
 
     fn maf_from(position: u64, reference: &str, alternate: &str) -> MafRecord {

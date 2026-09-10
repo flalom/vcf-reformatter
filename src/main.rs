@@ -165,12 +165,12 @@ struct Cli {
     sample_barcode: Option<String>,
 
     /// Mutation_Status for MAF output, e.g. Somatic or Germline. A VCF does not state this,
-    /// so the column is left as "." unless you set it.
+    /// so the column is left empty unless you set it.
     #[arg(long)]
     mutation_status: Option<String>,
 
     /// Sequence_Source for MAF output, e.g. WXS or WGS. A VCF does not state this, so the
-    /// column is left as "." unless you set it.
+    /// column is left empty unless you set it.
     #[arg(long)]
     sequence_source: Option<String>,
 
@@ -238,7 +238,7 @@ enum ReportFormatCli {
     /// Self-contained HTML report with stat cards and damage-metric charts (default)
     #[value(name = "html")]
     Html,
-    /// Plain-text report (legacy format)
+    /// Plain-text report (legacy format; no damage breakdown, that is HTML-only)
     #[value(name = "txt")]
     Txt,
     /// No report file
@@ -396,6 +396,29 @@ fn note_multi_transcript(count: usize) {
     }
 }
 
+fn warn_about_malformed_annotations(count: usize, key: &str) {
+    if count > 0 {
+        eprintln!(
+            "⚠️  Warning: {count} {key} annotation entr(ies) carry fewer fields than the header declares."
+        );
+        eprintln!("   Those entries are read as far as they go; the missing fields come out empty,");
+        eprintln!("   so affected variants are still converted — expect Unknown/blank annotation columns.");
+    }
+}
+
+/// The annotation key in use and how many `|`-separated fields its header declares, for the
+/// malformed-entry note. CSQ wins if both are present, matching the parser's own order.
+fn annotation_format(header: &str) -> Option<(&'static str, usize)> {
+    get_info_from_header::extract_csq_format_from_header(header)
+        .filter(|f| !f.is_empty())
+        .map(|f| ("CSQ", f.len()))
+        .or_else(|| {
+            get_info_from_header::extract_ann_format_from_header(header)
+                .filter(|f| !f.is_empty())
+                .map(|f| ("ANN", f.len()))
+        })
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -531,6 +554,8 @@ fn main() {
             let mut damage_breakdowns: Vec<summary::DamageBreakdown> = Vec::new();
             let mut multiallelic_count = 0usize;
             let mut multi_transcript_count = 0usize;
+            let mut malformed_count = 0usize;
+            let ann_format = annotation_format(&header);
             let mut progress_marks = 0usize;
             // Columns come from the first record, exactly as the buffered path always has.
             let mut headers: Vec<String> = Vec::new();
@@ -564,6 +589,14 @@ fn main() {
                     warn_about_multiallelic(chunk_multiallelic);
                 }
                 multiallelic_count += chunk_multiallelic;
+                if let Some((key, n_fields)) = ann_format {
+                    let chunk_malformed =
+                        summary::count_malformed_annotation_entries(&chunk, key, n_fields);
+                    if chunk_malformed > 0 && malformed_count == 0 {
+                        warn_about_malformed_annotations(chunk_malformed, key);
+                    }
+                    malformed_count += chunk_malformed;
+                }
                 if transcript_handling == TranscriptHandling::FirstOnly {
                     let chunk_multi_transcript = summary::count_multi_transcript_sites(&chunk);
                     if chunk_multi_transcript > 0 && multi_transcript_count == 0 {
@@ -760,6 +793,8 @@ fn main() {
             let mut damage_breakdowns: Vec<summary::DamageBreakdown> = Vec::new();
             let mut multiallelic_count = 0usize;
             let mut multi_transcript_count = 0usize;
+            let mut malformed_count = 0usize;
+            let ann_format = annotation_format(&header);
             let mut progress_marks = 0usize;
             #[cfg(feature = "parquet_out")]
             let parquet_file = format!("{maf_output_file}.parquet");
@@ -801,6 +836,14 @@ fn main() {
                     warn_about_multiallelic(chunk_multiallelic);
                 }
                 multiallelic_count += chunk_multiallelic;
+                if let Some((key, n_fields)) = ann_format {
+                    let chunk_malformed =
+                        summary::count_malformed_annotation_entries(&chunk, key, n_fields);
+                    if chunk_malformed > 0 && malformed_count == 0 {
+                        warn_about_malformed_annotations(chunk_malformed, key);
+                    }
+                    malformed_count += chunk_malformed;
+                }
                 if transcript_handling == TranscriptHandling::FirstOnly {
                     let chunk_multi_transcript = summary::count_multi_transcript_sites(&chunk);
                     if chunk_multi_transcript > 0 && multi_transcript_count == 0 {

@@ -72,6 +72,29 @@ pub fn count_multiallelic_sites(data_lines: &[String]) -> usize {
         .count()
 }
 
+/// Count annotation entries whose `|`-separated field count falls short of the count the
+/// header's `Format:` string declares — a truncated CSQ/ANN entry. The variant still converts
+/// (absent fields read as empty, so the row degrades to `Hugo_Symbol=Unknown` rather than
+/// disappearing), which is why this is a note on stderr and not a failure: one malformed
+/// annotation must not cost the other 92,000 variants on the file.
+pub fn count_malformed_annotation_entries(
+    data_lines: &[String],
+    key: &str,
+    expected_fields: usize,
+) -> usize {
+    if expected_fields == 0 {
+        return 0;
+    }
+    data_lines
+        .iter()
+        .filter_map(|line| line.split('\t').nth(7))
+        .flat_map(|info| info.split(';'))
+        .filter_map(|entry| entry.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
+        .flat_map(|value| value.split(','))
+        .filter(|annotation| annotation.split('|').count() < expected_fields)
+        .count()
+}
+
 /// Count VCF data lines whose CSQ (VEP) or ANN (SnpEff) annotation field lists more than one
 /// comma-separated transcript entry. These are the only sites where the transcript-handling
 /// mode changes what gets reported: `first` takes the annotator's own first entry without
@@ -317,6 +340,41 @@ pub fn compute_damage_breakdowns(records: &[ReformattedVcfRecord]) -> Vec<Damage
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_count_malformed_annotation_entries() {
+        let expected = 8; // Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE
+        let lines = vec![
+            // full entry: 8 fields, fine
+            "chr1\t1\t.\tA\tG\t.\tPASS\tDP=3;CSQ=G|missense_variant|MODERATE|G1|E1|Transcript|T1|protein_coding".to_string(),
+            // three fields: truncated
+            "chr1\t2\t.\tC\tT\t.\tPASS\tDP=3;CSQ=T|synonymous_variant|LOW".to_string(),
+            // empty value counts as one field, so also short
+            "chr1\t3\t.\tG\tA\t.\tPASS\tDP=3;CSQ=".to_string(),
+            // two comma-separated entries, only the second short
+            "chr1\t4\t.\tT\tC\t.\tPASS\tCSQ=C|a|b|c|d|e|f|g,C|short".to_string(),
+        ];
+        assert_eq!(
+            count_malformed_annotation_entries(&lines, "CSQ", expected),
+            3
+        );
+    }
+
+    #[test]
+    fn test_count_malformed_annotation_entries_ignores_other_info_keys() {
+        // A key that merely ends in CSQ, and a pipe inside an unrelated INFO value, must not
+        // be mistaken for the annotation field.
+        let lines = vec![
+            "chr1\t1\t.\tA\tG\t.\tPASS\tMY_CSQ=x|y;OTHER=a|b".to_string(),
+        ];
+        assert_eq!(count_malformed_annotation_entries(&lines, "CSQ", 8), 0);
+    }
+
+    #[test]
+    fn test_count_malformed_annotation_entries_no_format_declared() {
+        let lines = vec!["chr1\t1\t.\tA\tG\t.\tPASS\tCSQ=G|x".to_string()];
+        assert_eq!(count_malformed_annotation_entries(&lines, "CSQ", 0), 0);
+    }
+
     use super::*;
 
     #[test]

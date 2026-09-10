@@ -1,6 +1,6 @@
 [package]
 name = "vcf-reformatter"
-version = "0.4.0"
+version = "0.7.5"
 edition = "2021"
 description = "Fast VCF file parser and reformatter with VEP and SnpEff annotation support which can output to MAF"
 authors = ["Flavio Lombardo <fl@flaviolombardo.site>"]
@@ -30,7 +30,7 @@ num_cpus = "1.17.0"
 clap = { version = "4.0", features = ["derive"] }
 indexmap = "2.7"
 chrono = "0.4"
-arrow = { version = "53", optional = true, features = ["prettyprint"] }
+arrow = { version = "53", optional = true }
 parquet = { version = "53", optional = true }
 
 [dev-dependencies]
