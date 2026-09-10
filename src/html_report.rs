@@ -252,7 +252,12 @@ fn render_damage_json(breakdowns: &[DamageBreakdown]) -> String {
             if ci > 0 {
                 json.push(',');
             }
-            write!(json, "{{\"chrom\":\"{}\",\"counts\":[", escape_js_string(chrom)).unwrap();
+            write!(
+                json,
+                "{{\"chrom\":\"{}\",\"counts\":[",
+                escape_js_string(chrom)
+            )
+            .unwrap();
             for (i, cat) in b.categories.iter().enumerate() {
                 if i > 0 {
                     json.push(',');
@@ -279,7 +284,7 @@ fn render_damage_section(breakdowns: &[DamageBreakdown]) -> String {
         section.push_str("  <div class=\"damage-controls\">\n");
         section.push_str("    <label for=\"damage-metric-select\">Metric:</label>\n");
         section.push_str(
-        "    <select id=\"damage-metric-select\" onchange=\"renderDamageChart(this.value)\">\n",
+            "    <select id=\"damage-metric-select\" onchange=\"renderDamageChart(this.value)\">\n",
         );
         for (i, b) in breakdowns.iter().enumerate() {
             writeln!(
@@ -522,10 +527,7 @@ mod tests {
         let mut chr1 = IndexMap::new();
         chr1.insert("</script><script>alert(1)</script>".to_string(), 3usize);
         let mut per_chrom = IndexMap::new();
-        per_chrom.insert(
-            "</script><script>alert(2)</script>".to_string(),
-            chr1,
-        );
+        per_chrom.insert("</script><script>alert(2)</script>".to_string(), chr1);
 
         let breakdown = DamageBreakdown {
             metric_name: "</script><script>alert(3)</script>".to_string(),
@@ -562,7 +564,10 @@ mod tests {
 
         let html = render(&stats, &[breakdown], "2026-09-08 12:00:00");
 
-        assert!(html.contains("damage-legend"), "a colour legend must be rendered");
+        assert!(
+            html.contains("damage-legend"),
+            "a colour legend must be rendered"
+        );
         assert!(html.contains("legend-item"));
         assert!(
             html.contains("fill=\"white\"") && html.contains("pct.toFixed(0)"),
@@ -584,10 +589,7 @@ mod tests {
         let mut chr1 = IndexMap::new();
         chr1.insert("SNP".to_string(), 3usize);
         let mut per_chrom = IndexMap::new();
-        per_chrom.insert(
-            "</svg><img src=x onerror=alert(1)>".to_string(),
-            chr1,
-        );
+        per_chrom.insert("</svg><img src=x onerror=alert(1)>".to_string(), chr1);
 
         let breakdown = DamageBreakdown {
             metric_name: "Impact".to_string(),

@@ -60,7 +60,6 @@ impl ParsedFormatSample {
 
         headers
     }
-
 }
 
 // Alias for backward compatibility with tests

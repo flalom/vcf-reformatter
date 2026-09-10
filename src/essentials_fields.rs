@@ -30,12 +30,12 @@ pub struct MafRecord {
     pub hgvsp_short: Option<String>,
     pub transcript_id: Option<String>,
     pub exon_number: Option<String>,
-    pub t_depth: Option<u32>,      // was `total_depth` — INFO DP, unchanged extraction
-    pub t_ref_count: Option<u32>,  // new — INFO RO / sample AD[0]
-    pub t_alt_count: Option<u32>,  // was `depth` — INFO AO / sample AD[1], unchanged extraction
-    pub n_depth: Option<u32>,      // matched normal, from --normal-id's FORMAT/DP
-    pub n_ref_count: Option<u32>,  // matched normal, from --normal-id's AD[0]
-    pub n_alt_count: Option<u32>,  // matched normal, from --normal-id's AD[1]
+    pub t_depth: Option<u32>, // was `total_depth` — INFO DP, unchanged extraction
+    pub t_ref_count: Option<u32>, // new — INFO RO / sample AD[0]
+    pub t_alt_count: Option<u32>, // was `depth` — INFO AO / sample AD[1], unchanged extraction
+    pub n_depth: Option<u32>, // matched normal, from --normal-id's FORMAT/DP
+    pub n_ref_count: Option<u32>, // matched normal, from --normal-id's AD[0]
+    pub n_alt_count: Option<u32>, // matched normal, from --normal-id's AD[1]
     // Trailing custom columns (this tool's own additions, not part of vcf2maf's core 46):
     pub filter_status: String,
     pub qual: Option<f64>,
@@ -150,7 +150,14 @@ impl MafRecord {
         ncbi_build: &str,
         sample_barcode: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_reformatted_record_for_samples(record, center, ncbi_build, sample_barcode, None, None)
+        Self::from_reformatted_record_for_samples(
+            record,
+            center,
+            ncbi_build,
+            sample_barcode,
+            None,
+            None,
+        )
     }
 
     /// As `from_reformatted_record`, but reading the depth columns from explicitly named
@@ -370,7 +377,12 @@ impl MafRecord {
         sample_barcode: &str,
     ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
         Self::from_reformatted_record_multi_for_samples(
-            record, center, ncbi_build, sample_barcode, None, None,
+            record,
+            center,
+            ncbi_build,
+            sample_barcode,
+            None,
+            None,
         )
     }
 
@@ -438,12 +450,9 @@ impl MafRecord {
             // a 1/2 genotype reports the *other* ALT (vcf2maf.pl:918-921).
             if alternates.len() > 1 {
                 if let Some(genotype) = Self::tumor_genotype(&record.format_sample_data, tumor) {
-                    if let Some(allele1) = Self::genotype_allele1(
-                        &record.reference,
-                        &alternates,
-                        alt_index,
-                        &genotype,
-                    ) {
+                    if let Some(allele1) =
+                        Self::genotype_allele1(&record.reference, &alternates, alt_index, &genotype)
+                    {
                         maf_record.tumor_seq_allele1 = allele1;
                     }
                 }
@@ -578,8 +587,11 @@ impl MafRecord {
     }
 
     fn extract_total_depth(info_fields: &HashMap<String, String>) -> Option<u32> {
-        Self::get_annotation_field(info_fields, &["INFO_DP", "INFO_DEPTH", "ANN_DP", "ANN_TotalDepth"])
-            .and_then(|s| s.parse().ok())
+        Self::get_annotation_field(
+            info_fields,
+            &["INFO_DP", "INFO_DEPTH", "ANN_DP", "ANN_TotalDepth"],
+        )
+        .and_then(|s| s.parse().ok())
     }
 
     fn extract_tumor_depth(info_fields: &HashMap<String, String>) -> Option<u32> {
@@ -645,7 +657,8 @@ impl MafRecord {
         if let Some(allele_num) = Self::get_annotation_field(info_fields, &["CSQ_ALLELE_NUM"]) {
             return allele_num.parse::<usize>() == Ok(alt_index + 1);
         }
-        let Some(annotated) = Self::get_annotation_field(info_fields, &["CSQ_Allele", "ANN_Allele"])
+        let Some(annotated) =
+            Self::get_annotation_field(info_fields, &["CSQ_Allele", "ANN_Allele"])
         else {
             return true;
         };
@@ -675,7 +688,11 @@ impl MafRecord {
             .count()
     }
 
-    fn trim_shared_prefix(position: u64, reference: &str, alternate: &str) -> (u64, String, String) {
+    fn trim_shared_prefix(
+        position: u64,
+        reference: &str,
+        alternate: &str,
+    ) -> (u64, String, String) {
         let shared = Self::shared_prefix_len(reference, alternate);
         (
             position + shared as u64,
@@ -903,14 +920,17 @@ impl MafRecord {
     fn map_consequence_to_maf(consequence: &str, variant_type: &str, inframe: bool) -> String {
         let term = Self::resolve_one_consequence(&consequence.to_lowercase());
 
-        if matches!(term.as_str(), "splice_acceptor_variant" | "splice_donor_variant") {
+        if matches!(
+            term.as_str(),
+            "splice_acceptor_variant" | "splice_donor_variant"
+        ) {
             return "Splice_Site".to_string();
         }
         if term == "stop_gained" {
             return "Nonsense_Mutation".to_string();
         }
-        let is_frameshift_like = term == "frameshift_variant"
-            || (term == "protein_altering_variant" && !inframe);
+        let is_frameshift_like =
+            term == "frameshift_variant" || (term == "protein_altering_variant" && !inframe);
         if is_frameshift_like && variant_type == "DEL" {
             return "Frame_Shift_Del".to_string();
         }
@@ -935,7 +955,10 @@ impl MafRecord {
         }
         if matches!(
             term.as_str(),
-            "missense_variant" | "coding_sequence_variant" | "conservative_missense_variant" | "rare_amino_acid_variant"
+            "missense_variant"
+                | "coding_sequence_variant"
+                | "conservative_missense_variant"
+                | "rare_amino_acid_variant"
         ) {
             return "Missense_Mutation".to_string();
         }
@@ -1010,11 +1033,30 @@ impl MafRecord {
     /// 3-letter → 1-letter amino acid code table, verbatim from vcf2maf's `%aa3to1`
     /// (mskcc/vcf2maf, vcf2maf.pl) so HGVSp_Short matches the reference tool exactly.
     const AA_3_TO_1: &'static [(&'static str, &'static str)] = &[
-        ("Ala", "A"), ("Arg", "R"), ("Asn", "N"), ("Asp", "D"), ("Asx", "B"),
-        ("Cys", "C"), ("Glu", "E"), ("Gln", "Q"), ("Glx", "Z"), ("Gly", "G"),
-        ("His", "H"), ("Ile", "I"), ("Leu", "L"), ("Lys", "K"), ("Met", "M"),
-        ("Phe", "F"), ("Pro", "P"), ("Ser", "S"), ("Thr", "T"), ("Trp", "W"),
-        ("Tyr", "Y"), ("Val", "V"), ("Xxx", "X"), ("Ter", "*"),
+        ("Ala", "A"),
+        ("Arg", "R"),
+        ("Asn", "N"),
+        ("Asp", "D"),
+        ("Asx", "B"),
+        ("Cys", "C"),
+        ("Glu", "E"),
+        ("Gln", "Q"),
+        ("Glx", "Z"),
+        ("Gly", "G"),
+        ("His", "H"),
+        ("Ile", "I"),
+        ("Leu", "L"),
+        ("Lys", "K"),
+        ("Met", "M"),
+        ("Phe", "F"),
+        ("Pro", "P"),
+        ("Ser", "S"),
+        ("Thr", "T"),
+        ("Trp", "W"),
+        ("Tyr", "Y"),
+        ("Val", "V"),
+        ("Xxx", "X"),
+        ("Ter", "*"),
     ];
 
     /// Convert an HGVSp protein-change string to its short form, e.g.
@@ -1074,7 +1116,8 @@ impl MafRecord {
     }
 
     fn classify_by_impact(info_fields: &HashMap<String, String>) -> String {
-        let impact = Self::get_annotation_field(info_fields, &["CSQ_IMPACT", "ANN_Annotation_Impact"]);
+        let impact =
+            Self::get_annotation_field(info_fields, &["CSQ_IMPACT", "ANN_Annotation_Impact"]);
         match impact.as_deref().map(|s| s.to_uppercase()).as_deref() {
             Some("HIGH") | Some("MODERATE") => "Missense_Mutation".to_string(),
             Some("LOW") | Some("MODIFIER") => "Silent".to_string(),
@@ -1085,20 +1128,56 @@ impl MafRecord {
 
     pub fn get_maf_headers() -> Vec<String> {
         [
-            "Hugo_Symbol", "Entrez_Gene_Id", "Center", "NCBI_Build", "Chromosome",
-            "Start_Position", "End_Position", "Strand", "Variant_Classification",
-            "Variant_Type", "Reference_Allele", "Tumor_Seq_Allele1", "Tumor_Seq_Allele2",
-            "dbSNP_RS", "dbSNP_Val_Status", "Tumor_Sample_Barcode",
-            "Matched_Norm_Sample_Barcode", "Match_Norm_Seq_Allele1", "Match_Norm_Seq_Allele2",
-            "Tumor_Validation_Allele1", "Tumor_Validation_Allele2",
-            "Match_Norm_Validation_Allele1", "Match_Norm_Validation_Allele2",
-            "Verification_Status", "Validation_Status", "Mutation_Status",
-            "Sequencing_Phase", "Sequence_Source", "Validation_Method", "Score",
-            "BAM_File", "Sequencer", "Tumor_Sample_UUID", "Matched_Norm_Sample_UUID",
-            "HGVSc", "HGVSp", "HGVSp_Short", "Transcript_ID", "Exon_Number",
-            "t_depth", "t_ref_count", "t_alt_count", "n_depth", "n_ref_count",
-            "n_alt_count", "all_effects",
-            "FILTER", "QUAL", "VAF", "Protein_Position",
+            "Hugo_Symbol",
+            "Entrez_Gene_Id",
+            "Center",
+            "NCBI_Build",
+            "Chromosome",
+            "Start_Position",
+            "End_Position",
+            "Strand",
+            "Variant_Classification",
+            "Variant_Type",
+            "Reference_Allele",
+            "Tumor_Seq_Allele1",
+            "Tumor_Seq_Allele2",
+            "dbSNP_RS",
+            "dbSNP_Val_Status",
+            "Tumor_Sample_Barcode",
+            "Matched_Norm_Sample_Barcode",
+            "Match_Norm_Seq_Allele1",
+            "Match_Norm_Seq_Allele2",
+            "Tumor_Validation_Allele1",
+            "Tumor_Validation_Allele2",
+            "Match_Norm_Validation_Allele1",
+            "Match_Norm_Validation_Allele2",
+            "Verification_Status",
+            "Validation_Status",
+            "Mutation_Status",
+            "Sequencing_Phase",
+            "Sequence_Source",
+            "Validation_Method",
+            "Score",
+            "BAM_File",
+            "Sequencer",
+            "Tumor_Sample_UUID",
+            "Matched_Norm_Sample_UUID",
+            "HGVSc",
+            "HGVSp",
+            "HGVSp_Short",
+            "Transcript_ID",
+            "Exon_Number",
+            "t_depth",
+            "t_ref_count",
+            "t_alt_count",
+            "n_depth",
+            "n_ref_count",
+            "n_alt_count",
+            "all_effects",
+            "FILTER",
+            "QUAL",
+            "VAF",
+            "Protein_Position",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1183,11 +1262,17 @@ mod tests {
     #[test]
     fn test_is_symbolic_allele() {
         for alt in ["<DEL>", "<NON_REF>", "<*>", "A[chr2:456[", "]chr2:456]A"] {
-            assert!(MafRecord::is_symbolic_allele(alt), "{alt} is not a base sequence");
+            assert!(
+                MafRecord::is_symbolic_allele(alt),
+                "{alt} is not a base sequence"
+            );
         }
         // `*` is a spanning deletion, not a symbolic allele: those rows are kept on purpose.
         for alt in ["A", "ACGT", "-", "*"] {
-            assert!(!MafRecord::is_symbolic_allele(alt), "{alt} must still convert");
+            assert!(
+                !MafRecord::is_symbolic_allele(alt),
+                "{alt} must still convert"
+            );
         }
     }
 
@@ -1313,8 +1398,7 @@ mod tests {
     fn test_multiallelic_annotation_stays_on_its_own_allele() {
         // VEP annotated GCCCC only; CCCCC must not inherit its gene and consequence.
         let record = annotated_record(8324505, "CCCCA", "GCCCC,CCCCC", "GCCCC");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
         assert_eq!(rows.len(), 2, "one row per ALT");
         assert_eq!(rows[0].hugo_symbol, "SLC45A1");
@@ -1326,8 +1410,7 @@ mod tests {
     #[test]
     fn test_multiallelic_annotation_kept_when_it_names_the_second_allele() {
         let record = annotated_record(8324505, "CCCCA", "GCCCC,CCCCC", "CCCCC");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
         assert_eq!(rows[0].hugo_symbol, "Unknown");
         assert_eq!(rows[1].hugo_symbol, "SLC45A1");
@@ -1337,10 +1420,12 @@ mod tests {
     fn test_multiallelic_matches_vep_minimal_indel_allele() {
         // VEP reports deletions as "-": REF=AT ALT=A is a deletion of T.
         let record = annotated_record(100, "AT", "A,ATT", "-");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
-        assert_eq!(rows[0].hugo_symbol, "SLC45A1", "deletion allele is the annotated one");
+        assert_eq!(
+            rows[0].hugo_symbol, "SLC45A1",
+            "deletion allele is the annotated one"
+        );
         assert_eq!(rows[1].hugo_symbol, "Unknown");
     }
 
@@ -1349,10 +1434,12 @@ mod tests {
         // Real site: REF=TGGAGGA ALT=T,TGGAGGAGGA — VEP names the insertion allele
         // "GGAGGAGGA", i.e. the ALT with only its anchor base removed.
         let record = annotated_record(73385903, "TGGAGGA", "T,TGGAGGAGGA", "GGAGGAGGA");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
-        assert_eq!(rows[0].hugo_symbol, "Unknown", "deletion allele was not annotated");
+        assert_eq!(
+            rows[0].hugo_symbol, "Unknown",
+            "deletion allele was not annotated"
+        );
         assert_eq!(rows[1].hugo_symbol, "SLC45A1");
     }
 
@@ -1364,8 +1451,7 @@ mod tests {
         record
             .info_fields
             .insert("CSQ_ALLELE_NUM".to_string(), "2".to_string());
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
         assert_eq!(rows[0].hugo_symbol, "Unknown");
         assert_eq!(rows[1].hugo_symbol, "SLC45A1");
@@ -1375,8 +1461,7 @@ mod tests {
     fn test_single_allele_annotation_is_never_stripped() {
         // Guard: allele filtering must not touch the ordinary one-ALT case.
         let record = annotated_record(100, "A", "G", "does_not_match");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hugo_symbol, "SLC45A1");
@@ -1405,8 +1490,7 @@ mod tests {
         if let Some(p) = hgvsp {
             info_fields.insert("CSQ_HGVSp".to_string(), p.to_string());
         }
-        let record =
-            create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", info_fields);
+        let record = create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", info_fields);
         MafRecord::from_reformatted_record(&record, "test", "GRCh38", "sample").unwrap()
     }
 
@@ -1470,7 +1554,11 @@ mod tests {
     fn test_splice_rule_keys_on_the_most_severe_consequence() {
         // vcf2maf gates on One_Consequence, i.e. after sorting by severity — not on whichever
         // term VEP happened to list first. splice_donor (2) outranks intron_variant (14).
-        let maf = maf_with_hgvs("intron_variant&splice_donor_variant", Some("c.300+1G>A"), None);
+        let maf = maf_with_hgvs(
+            "intron_variant&splice_donor_variant",
+            Some("c.300+1G>A"),
+            None,
+        );
         assert_eq!(maf.hgvsp_short.as_deref(), Some("p.X100_splice"));
     }
 
@@ -1604,8 +1692,7 @@ mod tests {
         // Real site: chr1:240207640 REF=CT ALT=TC,CC GT=1/2. vcf2maf.pl:921 takes the first GT
         // allele that isn't this row's variant, so the TC row reports CC and vice versa.
         let record = record_with_genotype("CT", "TC,CC", "1/2");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
         assert_eq!(rows[0].tumor_seq_allele2, "TC");
         assert_eq!(rows[0].tumor_seq_allele1, "CC");
@@ -1617,11 +1704,13 @@ mod tests {
     #[test]
     fn test_multiallelic_genotype_with_reference_allele_reports_reference() {
         let record = record_with_genotype("CT", "TC,CC", "0/2");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
         assert_eq!(rows[1].tumor_seq_allele2, "C");
-        assert_eq!(rows[1].tumor_seq_allele1, "T", "GT names the reference allele");
+        assert_eq!(
+            rows[1].tumor_seq_allele1, "T",
+            "GT names the reference allele"
+        );
     }
 
     #[test]
@@ -1629,8 +1718,7 @@ mod tests {
         // REF=TGGAGGA ALT=T,TGGAGGAGGA GT=1/2: for the insertion row the trim eats 7 bases, more
         // than the sibling deletion allele has, and vcf2maf's substr loop leaves it as "-".
         let record = record_with_genotype("TGGAGGA", "T,TGGAGGAGGA", "1/2");
-        let rows =
-            MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
 
         assert_eq!(rows[1].tumor_seq_allele2, "GGA", "insertion row");
         assert_eq!(rows[1].tumor_seq_allele1, "-");
@@ -1706,7 +1794,12 @@ mod tests {
             ]),
         };
         let mut record = create_test_maf_record(
-            "chr1", 69787, "T", "A", Some(50.0), "PASS",
+            "chr1",
+            69787,
+            "T",
+            "A",
+            Some(50.0),
+            "PASS",
             HashMap::from([
                 ("INFO_DP".to_string(), "7".to_string()),
                 ("INFO_RO".to_string(), "5".to_string()),
@@ -1730,7 +1823,12 @@ mod tests {
         // allele (ref,alt1,alt2), and that is what each row must report.
         use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
         let mut record = create_test_maf_record(
-            "chr1", 1000, "A", "G,T", Some(50.0), "PASS",
+            "chr1",
+            1000,
+            "A",
+            "G,T",
+            Some(50.0),
+            "PASS",
             HashMap::from([("INFO_AO".to_string(), "30,40".to_string())]),
         );
         record.format_sample_data = Some(ParsedFormatSample {
@@ -1754,15 +1852,32 @@ mod tests {
         });
 
         let mafs = MafRecord::from_reformatted_record_multi_for_samples(
-            &record, "c", "GRCh38", "s", Some("TUMOR"), None,
+            &record,
+            "c",
+            "GRCh38",
+            "s",
+            Some("TUMOR"),
+            None,
         )
         .unwrap();
 
         assert_eq!(mafs.len(), 2);
-        assert_eq!(mafs[0].t_alt_count, Some(3), "first ALT takes the tumor's AD[1]");
-        assert_eq!(mafs[1].t_alt_count, Some(7), "second ALT takes the tumor's AD[2]");
+        assert_eq!(
+            mafs[0].t_alt_count,
+            Some(3),
+            "first ALT takes the tumor's AD[1]"
+        );
+        assert_eq!(
+            mafs[1].t_alt_count,
+            Some(7),
+            "second ALT takes the tumor's AD[2]"
+        );
         for m in &mafs {
-            let (d, r, a) = (m.t_depth.unwrap(), m.t_ref_count.unwrap(), m.t_alt_count.unwrap());
+            let (d, r, a) = (
+                m.t_depth.unwrap(),
+                m.t_ref_count.unwrap(),
+                m.t_alt_count.unwrap(),
+            );
             assert!(r + a <= d, "t_ref {r} + t_alt {a} exceeds t_depth {d}");
         }
     }
@@ -1775,7 +1890,12 @@ mod tests {
         // whole depth family empty here, and so must we.
         use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
         let mut record = create_test_maf_record(
-            "chr1", 21899250, "G", "C", Some(50.0), "PASS",
+            "chr1",
+            21899250,
+            "G",
+            "C",
+            Some(50.0),
+            "PASS",
             HashMap::from([
                 ("INFO_DP".to_string(), "2".to_string()),
                 ("INFO_RO".to_string(), "0".to_string()),
@@ -1803,7 +1923,12 @@ mod tests {
         });
 
         let maf = MafRecord::from_reformatted_record_for_samples(
-            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+            &record,
+            "c",
+            "GRCh38",
+            "s",
+            Some("B487_1_V"),
+            None,
         )
         .unwrap();
         assert_eq!(maf.t_depth, None);
@@ -1818,7 +1943,12 @@ mod tests {
         // t_depth of 1, and credited the normal's 2 alt reads to the tumor.
         let record = tumor_normal_record();
         let maf = MafRecord::from_reformatted_record_for_samples(
-            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+            &record,
+            "c",
+            "GRCh38",
+            "s",
+            Some("B487_1_V"),
+            None,
         )
         .unwrap();
 
@@ -1831,7 +1961,12 @@ mod tests {
     fn tumor_ref_and_alt_counts_never_exceed_tumor_depth() {
         let record = tumor_normal_record();
         let maf = MafRecord::from_reformatted_record_for_samples(
-            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+            &record,
+            "c",
+            "GRCh38",
+            "s",
+            Some("B487_1_V"),
+            None,
         )
         .unwrap();
         let (d, r, a) = (
@@ -1839,28 +1974,44 @@ mod tests {
             maf.t_ref_count.unwrap(),
             maf.t_alt_count.unwrap(),
         );
-        assert!(r + a <= d, "t_ref_count {r} + t_alt_count {a} exceeds t_depth {d}");
+        assert!(
+            r + a <= d,
+            "t_ref_count {r} + t_alt_count {a} exceeds t_depth {d}"
+        );
     }
 
     #[test]
     fn naming_the_normal_sample_populates_the_matched_normal_columns() {
         let record = tumor_normal_record();
         let maf = MafRecord::from_reformatted_record_for_samples(
-            &record, "c", "GRCh38", "s", Some("B487_1_V"), Some("B487_1_cOM"),
+            &record,
+            "c",
+            "GRCh38",
+            "s",
+            Some("B487_1_V"),
+            Some("B487_1_cOM"),
         )
         .unwrap();
 
         assert_eq!(maf.n_depth, Some(6));
         assert_eq!(maf.n_ref_count, Some(4));
         assert_eq!(maf.n_alt_count, Some(2));
-        assert_eq!(maf.matched_norm_sample_barcode.as_deref(), Some("B487_1_cOM"));
+        assert_eq!(
+            maf.matched_norm_sample_barcode.as_deref(),
+            Some("B487_1_cOM")
+        );
     }
 
     #[test]
     fn matched_normal_columns_stay_empty_when_no_normal_is_named() {
         let record = tumor_normal_record();
         let maf = MafRecord::from_reformatted_record_for_samples(
-            &record, "c", "GRCh38", "s", Some("B487_1_V"), None,
+            &record,
+            "c",
+            "GRCh38",
+            "s",
+            Some("B487_1_V"),
+            None,
         )
         .unwrap();
 
@@ -1874,7 +2025,12 @@ mod tests {
         // Falling back to sample 1 would reproduce the guess this parameter exists to remove.
         let record = tumor_normal_record();
         let maf = MafRecord::from_reformatted_record_for_samples(
-            &record, "c", "GRCh38", "s", Some("NOT_IN_THIS_VCF"), None,
+            &record,
+            "c",
+            "GRCh38",
+            "s",
+            Some("NOT_IN_THIS_VCF"),
+            None,
         )
         .unwrap();
 
@@ -1886,8 +2042,7 @@ mod tests {
     fn without_a_named_tumor_the_first_sample_is_still_used() {
         // Existing single-sample behaviour must not change; only naming a sample changes it.
         let record = tumor_normal_record();
-        let maf =
-            MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
         assert_eq!(maf.t_depth, Some(1));
     }
 
@@ -1921,20 +2076,56 @@ mod tests {
         let headers = MafRecord::get_maf_headers();
         assert_eq!(headers.len(), 50);
         let expected = [
-            "Hugo_Symbol", "Entrez_Gene_Id", "Center", "NCBI_Build", "Chromosome",
-            "Start_Position", "End_Position", "Strand", "Variant_Classification",
-            "Variant_Type", "Reference_Allele", "Tumor_Seq_Allele1", "Tumor_Seq_Allele2",
-            "dbSNP_RS", "dbSNP_Val_Status", "Tumor_Sample_Barcode",
-            "Matched_Norm_Sample_Barcode", "Match_Norm_Seq_Allele1", "Match_Norm_Seq_Allele2",
-            "Tumor_Validation_Allele1", "Tumor_Validation_Allele2",
-            "Match_Norm_Validation_Allele1", "Match_Norm_Validation_Allele2",
-            "Verification_Status", "Validation_Status", "Mutation_Status",
-            "Sequencing_Phase", "Sequence_Source", "Validation_Method", "Score",
-            "BAM_File", "Sequencer", "Tumor_Sample_UUID", "Matched_Norm_Sample_UUID",
-            "HGVSc", "HGVSp", "HGVSp_Short", "Transcript_ID", "Exon_Number",
-            "t_depth", "t_ref_count", "t_alt_count", "n_depth", "n_ref_count",
-            "n_alt_count", "all_effects",
-            "FILTER", "QUAL", "VAF", "Protein_Position",
+            "Hugo_Symbol",
+            "Entrez_Gene_Id",
+            "Center",
+            "NCBI_Build",
+            "Chromosome",
+            "Start_Position",
+            "End_Position",
+            "Strand",
+            "Variant_Classification",
+            "Variant_Type",
+            "Reference_Allele",
+            "Tumor_Seq_Allele1",
+            "Tumor_Seq_Allele2",
+            "dbSNP_RS",
+            "dbSNP_Val_Status",
+            "Tumor_Sample_Barcode",
+            "Matched_Norm_Sample_Barcode",
+            "Match_Norm_Seq_Allele1",
+            "Match_Norm_Seq_Allele2",
+            "Tumor_Validation_Allele1",
+            "Tumor_Validation_Allele2",
+            "Match_Norm_Validation_Allele1",
+            "Match_Norm_Validation_Allele2",
+            "Verification_Status",
+            "Validation_Status",
+            "Mutation_Status",
+            "Sequencing_Phase",
+            "Sequence_Source",
+            "Validation_Method",
+            "Score",
+            "BAM_File",
+            "Sequencer",
+            "Tumor_Sample_UUID",
+            "Matched_Norm_Sample_UUID",
+            "HGVSc",
+            "HGVSp",
+            "HGVSp_Short",
+            "Transcript_ID",
+            "Exon_Number",
+            "t_depth",
+            "t_ref_count",
+            "t_alt_count",
+            "n_depth",
+            "n_ref_count",
+            "n_alt_count",
+            "all_effects",
+            "FILTER",
+            "QUAL",
+            "VAF",
+            "Protein_Position",
         ];
         assert_eq!(headers, expected.to_vec());
     }
@@ -1943,9 +2134,8 @@ mod tests {
     fn test_to_tsv_line_leaves_unsupported_columns_empty() {
         let record =
             create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", HashMap::new());
-        let maf =
-            MafRecord::from_reformatted_record(&record, "TestCenter", "GRCh38", "SAMPLE-001")
-                .unwrap();
+        let maf = MafRecord::from_reformatted_record(&record, "TestCenter", "GRCh38", "SAMPLE-001")
+            .unwrap();
         let tsv = maf.to_tsv_line();
         let fields: Vec<&str> = tsv.split('\t').collect();
         assert_eq!(fields.len(), 50);

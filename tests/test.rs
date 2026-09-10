@@ -5,7 +5,7 @@ use tempfile::tempdir;
 
 use vcf_reformatter::{
     extract_csq_and_csq_names::extract_csq_regex,
-    extract_sample_info::{parse_format_and_samples, ParsedFormatSample, _SampleData},
+    extract_sample_info::{_SampleData, parse_format_and_samples, ParsedFormatSample},
     get_info_from_header::extract_csq_format_from_header,
     read_vcf_gz::read_vcf_gz,
     reformat_vcf::{
@@ -838,7 +838,10 @@ fn test_parse_info_field_empty() {
     assert!(result.is_ok());
     let (records, field_type) = result.unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::None);
+    assert_eq!(
+        field_type,
+        vcf_reformatter::reformat_vcf::AnnotationFieldType::None
+    );
 }
 #[test]
 fn test_parse_info_field_no_annotations() {
@@ -856,7 +859,10 @@ fn test_parse_info_field_no_annotations() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].get("INFO_DP"), Some(&"10".to_string()));
     assert_eq!(records[0].get("INFO_AF"), Some(&"0.5".to_string()));
-    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::None);
+    assert_eq!(
+        field_type,
+        vcf_reformatter::reformat_vcf::AnnotationFieldType::None
+    );
 }
 
 #[test]
@@ -879,7 +885,10 @@ fn test_parse_info_field_with_csq() {
         Some(&"missense_variant".to_string())
     );
     assert_eq!(records[0].get("INFO_DP"), Some(&"10".to_string()));
-    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::Csq);
+    assert_eq!(
+        field_type,
+        vcf_reformatter::reformat_vcf::AnnotationFieldType::Csq
+    );
 }
 
 #[test]
@@ -933,7 +942,10 @@ fn test_parse_info_field_with_ann() {
     assert_eq!(records[0].get("ANN_Gene_Name"), Some(&"BRCA1".to_string()));
     assert_eq!(records[0].get("INFO_DP"), Some(&"15".to_string()));
     assert_eq!(records[0].get("INFO_AF"), Some(&"0.3".to_string()));
-    assert_eq!(field_type, vcf_reformatter::reformat_vcf::AnnotationFieldType::Ann);
+    assert_eq!(
+        field_type,
+        vcf_reformatter::reformat_vcf::AnnotationFieldType::Ann
+    );
 }
 
 //############# add tests for snpeff
@@ -1959,10 +1971,18 @@ fn test_reformatted_record_carries_annotation_type() {
     use vcf_reformatter::reformat_vcf::AnnotationFieldType;
 
     let record = create_test_maf_record(
-        "chr1", 1000, "A", "T", Some(30.0), "PASS",
+        "chr1",
+        1000,
+        "A",
+        "T",
+        Some(30.0),
+        "PASS",
         HashMap::from([
             ("CSQ_SYMBOL".to_string(), "BRCA1".to_string()),
-            ("CSQ_Consequence".to_string(), "missense_variant".to_string()),
+            (
+                "CSQ_Consequence".to_string(),
+                "missense_variant".to_string(),
+            ),
         ]),
     );
     // This field should exist on ReformattedVcfRecord
@@ -1982,14 +2002,16 @@ fn test_maf_snpeff_field_priority_with_annotation_type() {
     info.insert("ANN_HGVS_p".to_string(), "p.Arg175His".to_string());
     info.insert("ANN_HGVS_c".to_string(), "c.524G>A".to_string());
 
-    let mut record = create_test_maf_record(
-        "chr17", 7675088, "C", "T", Some(100.0), "PASS", info,
-    );
+    let mut record = create_test_maf_record("chr17", 7675088, "C", "T", Some(100.0), "PASS", info);
     record.annotation_field_type = AnnotationFieldType::Ann;
 
     let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
-        &record, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+        &record,
+        "TestCenter",
+        "GRCh38",
+        "SAMPLE-001",
+    )
+    .unwrap();
 
     assert_eq!(maf.hugo_symbol, "TP53");
     assert_eq!(maf.variant_classification, "Missense_Mutation");
@@ -2017,12 +2039,14 @@ fn test_maf_snpeff_specific_consequences() {
     for (consequence, expected_classification) in &test_cases {
         let mut info = HashMap::new();
         info.insert("ANN_Annotation".to_string(), consequence.to_string());
-        let record = create_test_maf_record(
-            "chr1", 1000, "A", "T", Some(30.0), "PASS", info,
-        );
+        let record = create_test_maf_record("chr1", 1000, "A", "T", Some(30.0), "PASS", info);
         let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
-            &record, "TestCenter", "GRCh38", "SAMPLE-001",
-        ).unwrap();
+            &record,
+            "TestCenter",
+            "GRCh38",
+            "SAMPLE-001",
+        )
+        .unwrap();
         assert_eq!(
             maf.variant_classification, *expected_classification,
             "Failed for consequence: {} — expected {}, got {}",
@@ -2046,12 +2070,14 @@ fn test_maf_consequence_case_insensitive() {
     for (consequence, expected) in &test_cases {
         let mut info = HashMap::new();
         info.insert("ANN_Annotation".to_string(), consequence.to_string());
-        let record = create_test_maf_record(
-            "chr1", 1000, "A", "T", Some(30.0), "PASS", info,
-        );
+        let record = create_test_maf_record("chr1", 1000, "A", "T", Some(30.0), "PASS", info);
         let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
-            &record, "TestCenter", "GRCh38", "SAMPLE-001",
-        ).unwrap();
+            &record,
+            "TestCenter",
+            "GRCh38",
+            "SAMPLE-001",
+        )
+        .unwrap();
         assert_eq!(
             maf.variant_classification, *expected,
             "Failed for consequence: {} — expected {}, got {}",
@@ -2064,24 +2090,34 @@ fn test_maf_consequence_case_insensitive() {
 fn test_maf_utr_classification_correctness() {
     // 5' UTR should map to 5'UTR, not 3'UTR (was a bug in original code)
     let mut info_5utr = HashMap::new();
-    info_5utr.insert("CSQ_Consequence".to_string(), "5_prime_utr_variant".to_string());
-    let record_5utr = create_test_maf_record(
-        "chr1", 1000, "A", "T", Some(30.0), "PASS", info_5utr,
+    info_5utr.insert(
+        "CSQ_Consequence".to_string(),
+        "5_prime_utr_variant".to_string(),
     );
+    let record_5utr = create_test_maf_record("chr1", 1000, "A", "T", Some(30.0), "PASS", info_5utr);
     let maf_5utr = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
-        &record_5utr, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+        &record_5utr,
+        "TestCenter",
+        "GRCh38",
+        "SAMPLE-001",
+    )
+    .unwrap();
     assert_eq!(maf_5utr.variant_classification, "5'UTR");
 
     // 3' UTR should map to 3'UTR
     let mut info_3utr = HashMap::new();
-    info_3utr.insert("CSQ_Consequence".to_string(), "3_prime_utr_variant".to_string());
-    let record_3utr = create_test_maf_record(
-        "chr1", 1000, "A", "T", Some(30.0), "PASS", info_3utr,
+    info_3utr.insert(
+        "CSQ_Consequence".to_string(),
+        "3_prime_utr_variant".to_string(),
     );
+    let record_3utr = create_test_maf_record("chr1", 1000, "A", "T", Some(30.0), "PASS", info_3utr);
     let maf_3utr = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
-        &record_3utr, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+        &record_3utr,
+        "TestCenter",
+        "GRCh38",
+        "SAMPLE-001",
+    )
+    .unwrap();
     assert_eq!(maf_3utr.variant_classification, "3'UTR");
 }
 
@@ -2090,16 +2126,16 @@ fn test_maf_5utr_insertion() {
     use vcf_reformatter::essentials_fields::MafRecord;
 
     let mut info = HashMap::new();
-    info.insert("CSQ_Consequence".to_string(), "5_prime_utr_variant".to_string());
+    info.insert(
+        "CSQ_Consequence".to_string(),
+        "5_prime_utr_variant".to_string(),
+    );
     info.insert("CSQ_SYMBOL".to_string(), "SAMD11".to_string());
 
     // VCF insertion: ref=A, alt=ATCG at position 924024
-    let record = create_test_maf_record(
-        "chr1", 924024, "A", "ATCG", Some(53.0), "PASS", info,
-    );
-    let maf = MafRecord::from_reformatted_record(
-        &record, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+    let record = create_test_maf_record("chr1", 924024, "A", "ATCG", Some(53.0), "PASS", info);
+    let maf =
+        MafRecord::from_reformatted_record(&record, "TestCenter", "GRCh38", "SAMPLE-001").unwrap();
 
     assert_eq!(maf.variant_classification, "5'UTR");
     assert_eq!(maf.variant_type, "INS");
@@ -2115,16 +2151,16 @@ fn test_maf_5utr_deletion() {
     use vcf_reformatter::essentials_fields::MafRecord;
 
     let mut info = HashMap::new();
-    info.insert("ANN_Annotation".to_string(), "5_prime_UTR_variant".to_string());
+    info.insert(
+        "ANN_Annotation".to_string(),
+        "5_prime_UTR_variant".to_string(),
+    );
     info.insert("ANN_Gene_Name".to_string(), "SAMD11".to_string());
 
     // VCF deletion: ref=ATCG, alt=A at position 924024
-    let record = create_test_maf_record(
-        "chr1", 924024, "ATCG", "A", Some(40.0), "PASS", info,
-    );
-    let maf = MafRecord::from_reformatted_record(
-        &record, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+    let record = create_test_maf_record("chr1", 924024, "ATCG", "A", Some(40.0), "PASS", info);
+    let maf =
+        MafRecord::from_reformatted_record(&record, "TestCenter", "GRCh38", "SAMPLE-001").unwrap();
 
     assert_eq!(maf.variant_classification, "5'UTR");
     assert_eq!(maf.variant_type, "DEL");
@@ -2140,15 +2176,15 @@ fn test_maf_3utr_insertion() {
     use vcf_reformatter::essentials_fields::MafRecord;
 
     let mut info = HashMap::new();
-    info.insert("CSQ_Consequence".to_string(), "3_prime_utr_variant".to_string());
+    info.insert(
+        "CSQ_Consequence".to_string(),
+        "3_prime_utr_variant".to_string(),
+    );
     info.insert("CSQ_SYMBOL".to_string(), "OR4F5".to_string());
 
-    let record = create_test_maf_record(
-        "chr1", 69511, "G", "GAA", Some(100.0), "PASS", info,
-    );
-    let maf = MafRecord::from_reformatted_record(
-        &record, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+    let record = create_test_maf_record("chr1", 69511, "G", "GAA", Some(100.0), "PASS", info);
+    let maf =
+        MafRecord::from_reformatted_record(&record, "TestCenter", "GRCh38", "SAMPLE-001").unwrap();
 
     assert_eq!(maf.variant_classification, "3'UTR");
     assert_eq!(maf.variant_type, "INS");
@@ -2162,25 +2198,29 @@ fn test_maf_frameshift_ins_vs_del() {
 
     // Frameshift insertion: ref shorter than alt
     let mut info_ins = HashMap::new();
-    info_ins.insert("CSQ_Consequence".to_string(), "frameshift_variant".to_string());
-    let record_ins = create_test_maf_record(
-        "chr1", 1000, "A", "ATCG", Some(50.0), "PASS", info_ins,
+    info_ins.insert(
+        "CSQ_Consequence".to_string(),
+        "frameshift_variant".to_string(),
     );
-    let maf_ins = MafRecord::from_reformatted_record(
-        &record_ins, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+    let record_ins =
+        create_test_maf_record("chr1", 1000, "A", "ATCG", Some(50.0), "PASS", info_ins);
+    let maf_ins =
+        MafRecord::from_reformatted_record(&record_ins, "TestCenter", "GRCh38", "SAMPLE-001")
+            .unwrap();
     assert_eq!(maf_ins.variant_classification, "Frame_Shift_Ins");
     assert_eq!(maf_ins.variant_type, "INS");
 
     // Frameshift deletion: ref longer than alt
     let mut info_del = HashMap::new();
-    info_del.insert("CSQ_Consequence".to_string(), "frameshift_variant".to_string());
-    let record_del = create_test_maf_record(
-        "chr1", 1000, "ATCG", "A", Some(50.0), "PASS", info_del,
+    info_del.insert(
+        "CSQ_Consequence".to_string(),
+        "frameshift_variant".to_string(),
     );
-    let maf_del = MafRecord::from_reformatted_record(
-        &record_del, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+    let record_del =
+        create_test_maf_record("chr1", 1000, "ATCG", "A", Some(50.0), "PASS", info_del);
+    let maf_del =
+        MafRecord::from_reformatted_record(&record_del, "TestCenter", "GRCh38", "SAMPLE-001")
+            .unwrap();
     assert_eq!(maf_del.variant_classification, "Frame_Shift_Del");
     assert_eq!(maf_del.variant_type, "DEL");
 
@@ -2188,13 +2228,14 @@ fn test_maf_frameshift_ins_vs_del() {
     // Frame_Shift_Ins nor Frame_Shift_Del branch applies. Confirmed against vcf2maf's own
     // GetVariantClassification, which falls through to its catch-all in this case too.
     let mut info_snp = HashMap::new();
-    info_snp.insert("CSQ_Consequence".to_string(), "frameshift_variant".to_string());
-    let record_snp = create_test_maf_record(
-        "chr1", 1000, "AT", "GC", Some(50.0), "PASS", info_snp,
+    info_snp.insert(
+        "CSQ_Consequence".to_string(),
+        "frameshift_variant".to_string(),
     );
-    let maf_snp = MafRecord::from_reformatted_record(
-        &record_snp, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+    let record_snp = create_test_maf_record("chr1", 1000, "AT", "GC", Some(50.0), "PASS", info_snp);
+    let maf_snp =
+        MafRecord::from_reformatted_record(&record_snp, "TestCenter", "GRCh38", "SAMPLE-001")
+            .unwrap();
     assert_eq!(maf_snp.variant_classification, "Targeted_Region");
 }
 
@@ -2205,12 +2246,14 @@ fn test_maf_classification_impact_not_used_as_consequence() {
     info.insert("ANN_Annotation_Impact".to_string(), "HIGH".to_string());
     // No ANN_Annotation or CSQ_Consequence
 
-    let record = create_test_maf_record(
-        "chr1", 1000, "A", "T", Some(30.0), "PASS", info,
-    );
+    let record = create_test_maf_record("chr1", 1000, "A", "T", Some(30.0), "PASS", info);
     let maf = vcf_reformatter::essentials_fields::MafRecord::from_reformatted_record(
-        &record, "TestCenter", "GRCh38", "SAMPLE-001",
-    ).unwrap();
+        &record,
+        "TestCenter",
+        "GRCh38",
+        "SAMPLE-001",
+    )
+    .unwrap();
 
     // Should use IMPACT fallback path, not try to map "HIGH" as a consequence term
     assert_eq!(maf.variant_classification, "Missense_Mutation"); // HIGH impact fallback
@@ -2621,7 +2664,11 @@ fn test_mutation_status_and_sequence_source_flags() {
         ])
         .output()
         .expect("Failed to execute vcf-reformatter");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let maf = std::fs::read_to_string(dir.path().join("meta_reformatted.maf")).unwrap();
     let mut lines = maf.lines();
@@ -2646,22 +2693,35 @@ fn test_parquet_filename_keeps_the_format_extension_on_both_paths() {
     let dir = tempdir().unwrap();
     // The extension says what the parquet holds, so both paths keep it. The TSV path used to
     // strip it and write "pq_reformatted.parquet" against the MAF path's ".maf.parquet".
-    for (format, expected) in [("tsv", "pq_reformatted.tsv.parquet"), ("maf", "pq_reformatted.maf.parquet")] {
+    for (format, expected) in [
+        ("tsv", "pq_reformatted.tsv.parquet"),
+        ("maf", "pq_reformatted.maf.parquet"),
+    ] {
         let output = Command::new("cargo")
             .args([
-                "run", "--",
+                "run",
+                "--",
                 temp_vcf.path().to_str().unwrap(),
-                "-o", dir.path().to_str().unwrap(),
-                "-p", "pq",
-                "--output-format", format,
-                "--report", "none",
+                "-o",
+                dir.path().to_str().unwrap(),
+                "-p",
+                "pq",
+                "--output-format",
+                format,
+                "--report",
+                "none",
                 "--parquet",
                 // This VCF has no sample columns; MAF output refuses to run without a barcode.
-                "--sample-barcode", "TUMOR",
+                "--sample-barcode",
+                "TUMOR",
             ])
             .output()
             .expect("Failed to execute vcf-reformatter");
-        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(
             dir.path().join(expected).exists(),
             "--output-format {format} should write {expected}"
@@ -3269,21 +3329,23 @@ fn test_row_count_tsv_first_transcript() {
         "chr2\t300\t.\tG\tA\t50\tPASS\tDP=20;ANN=A|synonymous_variant|LOW|EGFR|ENSG3|transcript|ENST3|protein_coding|3/8|c.3G>A|p.L3L|3/300|3/300|3/99||".to_string(),
     ];
 
-    let (_, records) = reformat_vcf_data_with_header(
-        header, columns, &data_lines, TranscriptHandling::FirstOnly,
-    ).unwrap();
+    let (_, records) =
+        reformat_vcf_data_with_header(header, columns, &data_lines, TranscriptHandling::FirstOnly)
+            .unwrap();
 
     assert_eq!(
-        records.len(), data_lines.len(),
+        records.len(),
+        data_lines.len(),
         "Row count mismatch: {} input lines but {} output records",
-        data_lines.len(), records.len()
+        data_lines.len(),
+        records.len()
     );
 }
 
 #[test]
 fn test_row_count_maf_first_transcript() {
-    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
     use vcf_reformatter::essentials_fields::MafRecord;
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
 
     let header = "##fileformat=VCFv4.2\n##INFO=<ID=ANN,Number=.,Type=String,Description=\"Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO'\">";
     let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
@@ -3292,9 +3354,9 @@ fn test_row_count_maf_first_transcript() {
         "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG2|transcript|ENST2|protein_coding|7/11|c.2C>T|p.Q2*|2/200|2/200|2/66||".to_string(),
     ];
 
-    let (_, records) = reformat_vcf_data_with_header(
-        header, columns, &data_lines, TranscriptHandling::FirstOnly,
-    ).unwrap();
+    let (_, records) =
+        reformat_vcf_data_with_header(header, columns, &data_lines, TranscriptHandling::FirstOnly)
+            .unwrap();
 
     let mut maf_count = 0;
     for record in &records {
@@ -3303,9 +3365,11 @@ fn test_row_count_maf_first_transcript() {
     }
 
     assert_eq!(
-        maf_count, data_lines.len(),
+        maf_count,
+        data_lines.len(),
         "MAF row count mismatch: {} input lines but {} MAF records",
-        data_lines.len(), maf_count
+        data_lines.len(),
+        maf_count
     );
 }
 
@@ -3323,19 +3387,24 @@ fn test_row_count_split_transcripts() {
         "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30;ANN=T|stop_gained|HIGH|TP53|ENSG2|transcript|ENST3|protein_coding|7/11|c.2C>T|p.Q2*|2/200|2/200|2/66||".to_string(),
     ];
 
-    let (_, records) = reformat_vcf_data_with_header(
-        header, columns, &data_lines, TranscriptHandling::SplitRows,
-    ).unwrap();
+    let (_, records) =
+        reformat_vcf_data_with_header(header, columns, &data_lines, TranscriptHandling::SplitRows)
+            .unwrap();
 
     // 2 input lines, but line 1 has 2 transcripts -> 3 output records
     let expected_output_rows = 3;
     assert_eq!(
-        records.len(), expected_output_rows,
+        records.len(),
+        expected_output_rows,
         "Split transcript count mismatch: expected {} output records, got {}",
-        expected_output_rows, records.len()
+        expected_output_rows,
+        records.len()
     );
 
-    assert!(records.len() > data_lines.len(), "Split mode should produce more records than input lines");
+    assert!(
+        records.len() > data_lines.len(),
+        "Split mode should produce more records than input lines"
+    );
 }
 
 // ============================================================================
@@ -3356,7 +3425,11 @@ fn test_summary_input_counts_sum() {
 
     let counts = count_input_chromosomes(&lines);
     let total: usize = counts.values().sum();
-    assert_eq!(total, lines.len(), "Sum of per-chromosome counts must equal total input variants");
+    assert_eq!(
+        total,
+        lines.len(),
+        "Sum of per-chromosome counts must equal total input variants"
+    );
 }
 
 #[test]
@@ -3388,18 +3461,22 @@ fn test_summary_expansion_ratio_first_mode() {
         "chr2\t200\t.\tC\tT\t40\tPASS\tDP=30".to_string(),
     ];
 
-    let (_, records) = reformat_vcf_data_with_header(
-        header, columns, &data_lines, TranscriptHandling::FirstOnly,
-    ).unwrap();
+    let (_, records) =
+        reformat_vcf_data_with_header(header, columns, &data_lines, TranscriptHandling::FirstOnly)
+            .unwrap();
 
     let ratio = records.len() as f64 / data_lines.len() as f64;
-    assert!((ratio - 1.0).abs() < 0.001, "First-only mode should have expansion ratio of 1.0, got {}", ratio);
+    assert!(
+        (ratio - 1.0).abs() < 0.001,
+        "First-only mode should have expansion ratio of 1.0, got {}",
+        ratio
+    );
 }
 
 #[test]
 fn test_summary_write_and_read() {
-    use vcf_reformatter::summary::SummaryStats;
     use indexmap::IndexMap;
+    use vcf_reformatter::summary::SummaryStats;
 
     let mut input_counts = IndexMap::new();
     input_counts.insert("chr1".to_string(), 50);
@@ -3441,8 +3518,8 @@ fn test_summary_write_and_read() {
 
 #[cfg(feature = "parquet_out")]
 mod parquet_tests {
-    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
     use parquet::file::reader::{FileReader, SerializedFileReader};
+    use vcf_reformatter::reformat_vcf::{reformat_vcf_data_with_header, TranscriptHandling};
 
     fn count_parquet_rows(path: &str) -> usize {
         let file = std::fs::File::open(path).unwrap();
@@ -3464,8 +3541,12 @@ mod parquet_tests {
         ];
 
         let (headers, records) = reformat_vcf_data_with_header(
-            header, columns, &data_lines, TranscriptHandling::FirstOnly,
-        ).unwrap();
+            header,
+            columns,
+            &data_lines,
+            TranscriptHandling::FirstOnly,
+        )
+        .unwrap();
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap();
@@ -3474,9 +3555,11 @@ mod parquet_tests {
 
         let total_rows = count_parquet_rows(path);
         assert_eq!(
-            total_rows, records.len(),
+            total_rows,
+            records.len(),
             "Parquet row count ({}) must match TSV record count ({})",
-            total_rows, records.len()
+            total_rows,
+            records.len()
         );
     }
 
@@ -3484,13 +3567,15 @@ mod parquet_tests {
     fn test_parquet_columns_match_tsv_headers() {
         let header = "##fileformat=VCFv4.2";
         let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
-        let data_lines = vec![
-            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
-        ];
+        let data_lines = vec!["chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string()];
 
         let (headers, records) = reformat_vcf_data_with_header(
-            header, columns, &data_lines, TranscriptHandling::FirstOnly,
-        ).unwrap();
+            header,
+            columns,
+            &data_lines,
+            TranscriptHandling::FirstOnly,
+        )
+        .unwrap();
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap();
@@ -3500,7 +3585,11 @@ mod parquet_tests {
         let file = std::fs::File::open(path).unwrap();
         let reader = SerializedFileReader::new(file).unwrap();
         let schema = reader.metadata().file_metadata().schema_descr();
-        let parquet_columns: Vec<String> = schema.columns().iter().map(|c| c.name().to_string()).collect();
+        let parquet_columns: Vec<String> = schema
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
 
         assert_eq!(
             parquet_columns, headers,
@@ -3520,10 +3609,15 @@ mod parquet_tests {
         ];
 
         let (_, records) = reformat_vcf_data_with_header(
-            header, columns, &data_lines, TranscriptHandling::FirstOnly,
-        ).unwrap();
+            header,
+            columns,
+            &data_lines,
+            TranscriptHandling::FirstOnly,
+        )
+        .unwrap();
 
-        let maf_records: Vec<MafRecord> = records.iter()
+        let maf_records: Vec<MafRecord> = records
+            .iter()
             .map(|r| MafRecord::from_reformatted_record(r, "TEST", "GRCh38", "SAMPLE").unwrap())
             .collect();
 
@@ -3534,9 +3628,11 @@ mod parquet_tests {
 
         let total_rows = count_parquet_rows(path);
         assert_eq!(
-            total_rows, maf_records.len(),
+            total_rows,
+            maf_records.len(),
             "Parquet MAF row count ({}) must match MAF record count ({})",
-            total_rows, maf_records.len()
+            total_rows,
+            maf_records.len()
         );
     }
 
@@ -3546,14 +3642,22 @@ mod parquet_tests {
 
         let header = "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL\">";
         let columns = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO";
-        let data_lines = vec!["chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;CSQ=G|missense_variant|MODERATE|BRCA1".to_string()];
+        let data_lines = vec![
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;CSQ=G|missense_variant|MODERATE|BRCA1".to_string(),
+        ];
 
         let (_, records) = reformat_vcf_data_with_header(
-            header, columns, &data_lines, TranscriptHandling::FirstOnly,
-        ).unwrap();
+            header,
+            columns,
+            &data_lines,
+            TranscriptHandling::FirstOnly,
+        )
+        .unwrap();
         let maf_records: Vec<MafRecord> = records
             .iter()
-            .map(|r| MafRecord::from_reformatted_record(r, "TestCenter", "GRCh38", "SAMPLE-001").unwrap())
+            .map(|r| {
+                MafRecord::from_reformatted_record(r, "TestCenter", "GRCh38", "SAMPLE-001").unwrap()
+            })
             .collect();
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -3563,7 +3667,11 @@ mod parquet_tests {
         let file = std::fs::File::open(path).unwrap();
         let reader = SerializedFileReader::new(file).unwrap();
         let schema = reader.metadata().file_metadata().schema_descr();
-        let parquet_columns: Vec<String> = schema.columns().iter().map(|c| c.name().to_string()).collect();
+        let parquet_columns: Vec<String> = schema
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
 
         assert_eq!(parquet_columns, MafRecord::get_maf_headers());
     }

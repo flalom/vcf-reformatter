@@ -56,13 +56,13 @@ cd vcf-reformatter
 cargo build --release
 ./target/release/vcf-reformatter sample.vcf.gz
 ````
-## MAF output status
+## 📋 MAF Output Status
 
 **VEP-annotated input: validated.** MAF output from VEP (CSQ) input is checked column-by-column
 against [vcf2maf](https://github.com/mskcc/vcf2maf) on three real files (12k, 34k and 92k
 variants) in all three transcript modes, with **zero unexplained differences**. The 50 columns and
 their order match `vcf2maf.pl`'s own header. The remaining differences are named, counted and
-deliberate — see [Known divergences from vcf2maf](#known-divergences-from-vcf2maf).
+deliberate. See [Known divergences from vcf2maf](#known-divergences-from-vcf2maf).
 
 **SnpEff-annotated input: still beta.** vcf2maf cannot parse SnpEff's `ANN` field at all, so there
 is no ground truth to validate the SnpEff MAF path against yet. Its structure is checked (50
@@ -77,7 +77,7 @@ confirmed. That validation lands in v0.8.0.
 
 **The Problem:** VCF files are notoriously difficult to analyze. Complex nested annotations, semicolon-separated INFO fields, and multi-transcript VEP annotations make downstream analysis a nightmare.
 
-**The Solution:** VCF Reformatter flattens everything into clean, readable TSV format that works seamlessly with Excel, R, Python, and any analysis tool (⚠️ beware Excel auto-correction!).
+**The Solution:** VCF Reformatter flattens everything into clean, readable TSV format that works with Excel, R, Python, and any analysis tool (⚠️ beware Excel auto-correction!).
 
 ### Before & After
 
@@ -98,7 +98,7 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 | 🧬 **VEP/SnpEff Annotation Parsing**    | Intelligent handling of CSQ/ANN annotations with correct field mapping for both | No more manual parsing of complex VEP/SnpEff output  |
 | 👀 **Automatic Annotation Recognition** | Automatic detection of CSQ/ANN annotations       | Saving even more time now for both VEP and SnpEff    |
 | 🔀 **Smart Transcript Handling**        | Annotator's first entry, most severe, or split    | Choose the analysis approach that fits your needs    |
-| 🚀 **Parallel Processing**              | Multi-threaded processing up to 30k variants/sec | Process large cohorts in minutes, not hours          |
+| 🚀 **Parallel Processing**              | Multi-threaded processing, 9k-17k variants/sec on real annotated files | Process large cohorts in minutes, not hours          |
 | 📁 **Native Compression**               | Direct `.vcf.gz` reading & gzip output           | Seamless workflow with compressed/uncompressed files |
 | 🎯 **Production Ready**                 | Comprehensive error handling & logging           | Reliable for automated pipelines                     |
 | 📋 **Summary Reports**                  | Per-chromosome variant distribution and processing stats | QC and reproducibility for pipeline logs             |
@@ -168,7 +168,7 @@ vcf-reformatter input.vcf.gz -t most-severe
 # All transcripts in separate rows (comprehensive)
 vcf-reformatter input.vcf.gz -t split
 
-# Read from stdin — plain or gzipped, auto-detected
+# Read from stdin: plain or gzipped, auto-detected
 bcftools view -f PASS input.vcf.gz | vcf-reformatter - -p filtered
 cat input.vcf.gz | vcf-reformatter -
 ```
@@ -255,9 +255,9 @@ Options:
       --normal-id <NAME>           Matched normal sample name. Populates
                                    n_depth/n_ref_count/n_alt_count
       --mutation-status <STATUS>   MAF Mutation_Status, e.g. Somatic. Empty
-                                   unless set — a VCF does not state this
+                                   unless set. A VCF does not state this
       --sequence-source <SOURCE>   MAF Sequence_Source, e.g. WXS. Empty unless
-                                   set — a VCF does not state this either
+                                   set. A VCF does not state this either
   -v, --verbose                    Detailed performance statistics
   -h, --help                       Show help
   -V, --version                    Show version
@@ -287,15 +287,15 @@ vcf-reformatter input.vcf.gz  # Uses first transcript by default
 
 Keeps whichever annotation the annotator listed first, without re-ranking it.
 
-When your VCF carries **one transcript annotation per variant** — VEP run with `--pick`, or a
-caller that annotates a single transcript, which is what many Mutect2 pipelines produce — that
+When your VCF carries **one transcript annotation per variant** (VEP run with `--pick`, or a
+caller that annotates a single transcript, which is what many Mutect2 pipelines produce), that
 entry *is* the annotator's own selection, and `first` reports exactly what the annotator decided.
 This is why it is the default: it passes the upstream choice through unchanged, and the same input
 always gives the same output.
 
 When a variant carries **several transcript annotations**, `first` takes literal list order, which
 is not severity order. The consequence reported is then the first one listed, which need not be the
-most damaging one present — expected behaviour, not an error. vcf-reformatter prints a note on
+most damaging one present. That is expected behaviour, and vcf-reformatter prints a note on
 stderr when it sees such sites so the choice is never silent. Use `-t most-severe` if you want the
 annotations ranked by consequence severity, or `-t split` to keep every transcript.
 
@@ -306,7 +306,7 @@ vcf-reformatter input.vcf.gz -t split
 ```
 Creates separate rows for each transcript (most detailed output)
 
-## 🧬 MAF Output
+## 🧾 MAF Output
 
 ```shell script
 # Single-sample tumor-only
@@ -323,11 +323,11 @@ vcf-reformatter input.vcf.gz --output-format maf \
 ### Columns
 
 50 columns: `vcf2maf.pl`'s 46 core columns in its exact order and naming, plus four extras this
-tool adds at the end — `FILTER`, `QUAL`, `VAF`, `Protein_Position`.
+tool adds at the end: `FILTER`, `QUAL`, `VAF`, `Protein_Position`.
 
 Columns with no source in a single VCF (validation and lab metadata, UUIDs, and the matched-normal
 columns when no `--normal-id` is given) are written **empty**, which is how vcf2maf itself renders
-a tumor-only MAF. A `.` in the output is a `.` that came from the VCF — absence and content are
+a tumor-only MAF. A `.` in the output is a `.` that came from the VCF. Absence and content are
 not the same thing.
 
 ### Known divergences from vcf2maf
@@ -336,7 +336,7 @@ not the same thing.
 |---|---|---|
 | Multiallelic rows | We annotate the allele the annotation actually describes; vcf2maf hangs the first CSQ entry on whichever ALT it emitted, and emits only one row per VCF line | vcf2maf's own guard keys on `ALLELE_NUM`, which VEP writes only under `--allele_number`. **We are right here** |
 | `Entrez_Gene_Id` | We emit the real ID; vcf2maf emits `0` | vcf2maf does not look it up |
-| `all_effects` | Empty | Deliberate gap: it needs the full per-transcript consequence list. Use `-t split` for the same information as rows rather than one `;`-joined cell |
+| `all_effects` | Empty | Deliberate gap: it needs the full per-transcript consequence list. Use `-t split` to get the same information as rows instead of one `;`-joined cell |
 | `Center` | Defaults to `Unknown_Center`; vcf2maf leaves it empty | Set it with `--center` |
 | `Strand` | Always `+` | Per the MAF spec the column is genomic, not the transcript strand (which is still in the TSV's `CSQ_STRAND`) |
 | `ALT=*` | Kept as a row typed `SNP`; vcf2maf drops the line | Accepted divergence |
@@ -373,7 +373,7 @@ density or not at all.
 ### Memory
 
 Both output paths stream: the VCF is read, converted, written and dropped in chunks, so peak
-memory is set by the chunk, not the file.
+memory stays roughly constant as the input grows.
 
 | input | TSV | MAF | MAF + `--parquet` |
 |---|---|---|---|
@@ -382,10 +382,10 @@ memory is set by the chunk, not the file.
 | 92,216 variants | 330 MB | 397 MB | 442 MB |
 
 Those three files differ in annotation density, so they are not a scaling test. The honest control
-is one file against eight copies of itself — same shape, 8x the bytes (46 MB → 362 MB): **TSV 232
-MB → 238 MB**, MAF + parquet 290 MB → 485 MB. The TSV path is flat; the MAF path is sublinear,
-heap high-water from churning small strings rather than retention. For reference vcf2maf uses
-111 MB on the 92k file, and 2.6 GB was our own figure before streaming landed.
+is one file against eight copies of itself, same shape, 8x the bytes (46 MB to 362 MB): **TSV 232
+MB → 238 MB**, MAF + parquet 290 MB → 485 MB. The TSV path is flat. The MAF path is sublinear:
+heap high-water from churning small strings, and nothing is retained (live footprint stays around
+234 MB). For reference vcf2maf uses 111 MB on the 92k file, and 2.6 GB was our own figure before streaming landed.
 
 ### Internal Optimizations
 - **Streaming I/O**: the reader hands back an iterator; both output paths convert and write in 10,000-line chunks and drop them, including `--parquet` (one row group per 65,536 rows)
@@ -407,17 +407,17 @@ vcf-reformatter input.vcf.gz -t split -j 0 -c -v
 ## 📊 Output Format
 
 ### File Structure
-- `{prefix}_header.txt` — original VCF header and metadata (TSV mode only)
-- `{prefix}_reformatted.tsv` — flattened tabular data (or `_reformatted.maf` with `--output-format maf`)
-- `{prefix}_summary.html` — processing report, unless `--report txt|none`
-- `{prefix}_reformatted.tsv.parquet` — with `--parquet`, written *alongside* the text file, never instead of it
+- `{prefix}_header.txt`: original VCF header and metadata (TSV mode only)
+- `{prefix}_reformatted.tsv`: flattened tabular data (or `_reformatted.maf` with `--output-format maf`)
+- `{prefix}_summary.html`: processing report, unless `--report txt|none`
+- `{prefix}_reformatted.tsv.parquet`: with `--parquet`, written *alongside* the text file, never instead of it
 
 Reading from stdin (`-`) with no `--prefix` names the outputs `stdin_*`.
 
 ### Parquet column types
 `POS`, `Start_Position`, `End_Position` and the depth columns are `uint64`; `QUAL` and `VAF` are
 `double`; everything else is a string. Unpopulated cells are real NULLs, ZSTD-compressed, one row
-group per 65,536 rows. Verified lossless against the sibling text output — 0 cell mismatches
+group per 65,536 rows. Verified lossless against the sibling text output: 0 cell mismatches
 across 35.9M cells.
 
 ### Column Types
@@ -507,13 +507,13 @@ singularity run \
 | **HPC Batch Processing** | `vcf-reformatter huge.vcf.gz -t most-severe -j 32 -c` | Optimized for high-performance computing |
 
 ## 🚀 What's New in v0.7.5
-- ✅ **MAF output validated against vcf2maf** — 50 columns in vcf2maf's own order, 0 unexplained differences across three real VEP files and all three transcript modes
-- ✅ **Streaming I/O** — memory is now flat in file size: 333 MB on a 92k-variant file, down from 2.6 GB
-- ✅ **Matched-normal and multi-sample support** — `--tumor-id` / `--normal-id` populate the tumor and normal depth columns from named samples instead of pooled INFO counts
-- ✅ **stdin support** — pass `-` to pipe from `bcftools`; plain or gzipped, auto-detected
-- ✅ **HTML report** — `--report html|txt|none`, self-contained page with per-chromosome SIFT / PolyPhen / IMPACT charts
-- ✅ **Parquet alongside text** — ZSTD, typed columns, bounded row groups, streamed
-- ✅ **MAF correctness fixes** — HGVS accession stripping, splice-variant protein coordinates, shared REF/ALT prefix trimming, per-allele annotation on multiallelic sites, `dbSNP_RS` from VEP's `Existing_variation`
+- ✅ **MAF output validated against vcf2maf.** 50 columns in vcf2maf's own order, 0 unexplained differences across three real VEP files and all three transcript modes
+- ✅ **Streaming I/O.** Memory is now flat in file size: 333 MB on a 92k-variant file, down from 2.6 GB
+- ✅ **Matched-normal and multi-sample support.** `--tumor-id` / `--normal-id` populate the tumor and normal depth columns from named samples instead of pooled INFO counts
+- ✅ **stdin support.** Pass `-` to pipe from `bcftools`; plain or gzipped, auto-detected
+- ✅ **HTML report.** `--report html|txt|none`, a self-contained page with per-chromosome SIFT / PolyPhen / IMPACT charts
+- ✅ **Parquet alongside text.** ZSTD, typed columns, bounded row groups, streamed
+- ✅ **MAF correctness fixes.** HGVS accession stripping, splice-variant protein coordinates, shared REF/ALT prefix trimming, per-allele annotation on multiallelic sites, `dbSNP_RS` from VEP's `Existing_variation`
 - ✅ **195 tests** (97 unit + 98 integration) plus a release validation harness in `tests/scripts/`
 
 ## Previous Releases
@@ -605,8 +605,8 @@ Yes! VCF Reformatter is designed for production use with:
 - **MAF**: Standardized cancer genomics format for downstream tools. Validated against vcf2maf for VEP input; still beta for SnpEff input
 
 ### Q: What if I get out-of-memory errors?
-Both paths stream since v0.7.5, so memory is set by the chunk rather than the file — an input 8x
-larger costs the TSV path 3% more memory. If you still hit a limit, drop `--parquet` (it buffers a
+Both paths stream since v0.7.5, so a bigger file does not cost more memory: an input 8x larger
+costs the TSV path 3% more. If you still hit a limit, drop `--parquet` (it buffers a
 row group) and monitor with `-v`.
 
 ___

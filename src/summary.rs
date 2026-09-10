@@ -31,16 +31,32 @@ impl SummaryStats {
 
         writeln!(file, "INPUT STATISTICS")?;
         writeln!(file, "----------------")?;
-        writeln!(file, "Total input variants:     {}", self.input_variant_count)?;
+        writeln!(
+            file,
+            "Total input variants:     {}",
+            self.input_variant_count
+        )?;
         writeln!(file, "Variants per chromosome:")?;
-        write!(file, "{}", format_chrom_table(&self.input_chrom_counts, self.input_variant_count))?;
+        write!(
+            file,
+            "{}",
+            format_chrom_table(&self.input_chrom_counts, self.input_variant_count)
+        )?;
         writeln!(file)?;
 
         writeln!(file, "OUTPUT STATISTICS")?;
         writeln!(file, "-----------------")?;
-        writeln!(file, "Total output records:     {}", self.output_record_count)?;
+        writeln!(
+            file,
+            "Total output records:     {}",
+            self.output_record_count
+        )?;
         writeln!(file, "Records per chromosome:")?;
-        write!(file, "{}", format_chrom_table(&self.output_chrom_counts, self.output_record_count))?;
+        write!(
+            file,
+            "{}",
+            format_chrom_table(&self.output_chrom_counts, self.output_record_count)
+        )?;
         writeln!(file)?;
 
         let expansion = if self.input_variant_count > 0 {
@@ -52,8 +68,16 @@ impl SummaryStats {
         writeln!(file, "PROCESSING")?;
         writeln!(file, "----------")?;
         writeln!(file, "Expansion ratio:          {:.2}x", expansion)?;
-        writeln!(file, "Processing time:          {:.2}s", self.processing_time_secs)?;
-        writeln!(file, "Processing rate:          {:.0} variants/sec", self.variants_per_sec)?;
+        writeln!(
+            file,
+            "Processing time:          {:.2}s",
+            self.processing_time_secs
+        )?;
+        writeln!(
+            file,
+            "Processing rate:          {:.0} variants/sec",
+            self.variants_per_sec
+        )?;
 
         Ok(())
     }
@@ -64,11 +88,7 @@ impl SummaryStats {
 pub fn count_multiallelic_sites(data_lines: &[String]) -> usize {
     data_lines
         .iter()
-        .filter(|line| {
-            line.split('\t')
-                .nth(4)
-                .is_some_and(|alt| alt.contains(','))
-        })
+        .filter(|line| line.split('\t').nth(4).is_some_and(|alt| alt.contains(',')))
         .count()
 }
 
@@ -107,8 +127,11 @@ pub fn count_multi_transcript_sites(data_lines: &[String]) -> usize {
             line.split('\t')
                 .nth(7)
                 .and_then(|info| {
-                    info.split(';')
-                        .find_map(|field| field.strip_prefix("CSQ=").or_else(|| field.strip_prefix("ANN=")))
+                    info.split(';').find_map(|field| {
+                        field
+                            .strip_prefix("CSQ=")
+                            .or_else(|| field.strip_prefix("ANN="))
+                    })
                 })
                 .is_some_and(|annotation| annotation.contains(','))
         })
@@ -285,7 +308,10 @@ fn build_metric_breakdown(
 /// operation — the result must equal `compute_damage_breakdowns` over the concatenated input.
 pub fn merge_damage_breakdowns(acc: &mut Vec<DamageBreakdown>, next: Vec<DamageBreakdown>) {
     for incoming in next {
-        match acc.iter_mut().find(|b| b.metric_name == incoming.metric_name) {
+        match acc
+            .iter_mut()
+            .find(|b| b.metric_name == incoming.metric_name)
+        {
             Some(existing) => {
                 for cat in incoming.categories {
                     if !existing.categories.contains(&cat) {
@@ -363,9 +389,7 @@ mod tests {
     fn test_count_malformed_annotation_entries_ignores_other_info_keys() {
         // A key that merely ends in CSQ, and a pipe inside an unrelated INFO value, must not
         // be mistaken for the annotation field.
-        let lines = vec![
-            "chr1\t1\t.\tA\tG\t.\tPASS\tMY_CSQ=x|y;OTHER=a|b".to_string(),
-        ];
+        let lines = vec!["chr1\t1\t.\tA\tG\t.\tPASS\tMY_CSQ=x|y;OTHER=a|b".to_string()];
         assert_eq!(count_malformed_annotation_entries(&lines, "CSQ", 8), 0);
     }
 
@@ -410,9 +434,11 @@ mod tests {
             // single CSQ entry
             "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50;CSQ=G|missense_variant|MODERATE|BRAF".to_string(),
             // two CSQ entries
-            "chr1\t200\t.\tC\tT\t40\tPASS\tCSQ=T|intron_variant||X,T|missense_variant||X".to_string(),
+            "chr1\t200\t.\tC\tT\t40\tPASS\tCSQ=T|intron_variant||X,T|missense_variant||X"
+                .to_string(),
             // two SnpEff ANN entries
-            "chr2\t300\t.\tG\tA\t50\tPASS\tANN=A|synonymous_variant||Y,A|stop_gained||Y".to_string(),
+            "chr2\t300\t.\tG\tA\t50\tPASS\tANN=A|synonymous_variant||Y,A|stop_gained||Y"
+                .to_string(),
             // comma in a different INFO field must not count
             "chr3\t400\t.\tT\tC\t50\tPASS\tAF=0.1,0.2;CSQ=C|intron_variant||Z".to_string(),
             // no annotation at all

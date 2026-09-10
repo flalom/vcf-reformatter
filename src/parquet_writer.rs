@@ -208,23 +208,46 @@ fn build_maf_batch(schema: &Arc<Schema>, records: &[MafRecord]) -> Result<Record
         .map(|(col_idx, header)| -> ArrayRef {
             match header.as_str() {
                 "Start_Position" => Arc::new(
-                    records.iter().map(|r| r.start_position).collect::<arrow::array::UInt64Array>(),
+                    records
+                        .iter()
+                        .map(|r| r.start_position)
+                        .collect::<arrow::array::UInt64Array>(),
                 ),
                 "End_Position" => Arc::new(
-                    records.iter().map(|r| r.end_position).collect::<arrow::array::UInt64Array>(),
+                    records
+                        .iter()
+                        .map(|r| r.end_position)
+                        .collect::<arrow::array::UInt64Array>(),
                 ),
                 "t_depth" => Arc::new(
-                    records.iter().map(|r| r.t_depth.map(|v| v as u64)).collect::<arrow::array::UInt64Array>(),
+                    records
+                        .iter()
+                        .map(|r| r.t_depth.map(|v| v as u64))
+                        .collect::<arrow::array::UInt64Array>(),
                 ),
                 "t_ref_count" => Arc::new(
-                    records.iter().map(|r| r.t_ref_count.map(|v| v as u64)).collect::<arrow::array::UInt64Array>(),
+                    records
+                        .iter()
+                        .map(|r| r.t_ref_count.map(|v| v as u64))
+                        .collect::<arrow::array::UInt64Array>(),
                 ),
                 "t_alt_count" => Arc::new(
-                    records.iter().map(|r| r.t_alt_count.map(|v| v as u64)).collect::<arrow::array::UInt64Array>(),
+                    records
+                        .iter()
+                        .map(|r| r.t_alt_count.map(|v| v as u64))
+                        .collect::<arrow::array::UInt64Array>(),
                 ),
-                "QUAL" => Arc::new(records.iter().map(|r| r.qual).collect::<arrow::array::Float64Array>()),
+                "QUAL" => Arc::new(
+                    records
+                        .iter()
+                        .map(|r| r.qual)
+                        .collect::<arrow::array::Float64Array>(),
+                ),
                 "VAF" => Arc::new(
-                    records.iter().map(|r| r.vaf.map(|v| v as f64)).collect::<arrow::array::Float64Array>(),
+                    records
+                        .iter()
+                        .map(|r| r.vaf.map(|v| v as f64))
+                        .collect::<arrow::array::Float64Array>(),
                 ),
                 // An unpopulated MAF cell is an empty string in the text output; parquet is
                 // typed, so it gets a real NULL rather than an empty string.

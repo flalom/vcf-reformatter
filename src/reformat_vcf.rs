@@ -399,7 +399,9 @@ fn parse_annotation_field_with_handling(
                 match parse_single_annotation(prefix, annotation, field_names) {
                     Ok(parsed) => all_annotations.push(parsed),
                     Err(e) => {
-                        eprintln!("Warning: Failed to parse {prefix} annotation '{annotation}': {e}");
+                        eprintln!(
+                            "Warning: Failed to parse {prefix} annotation '{annotation}': {e}"
+                        );
                     }
                 }
             }
@@ -642,7 +644,10 @@ fn find_most_severe_consequence(
     let is_canonical = |a: &str| field(a, i_canonical) == "YES";
 
     // vcf2maf.pl:878-880 — the worst affected GENE, not the worst effect.
-    let maf_gene = sorted.iter().find(|a| has_symbol(a)).map(|a| field(a, i_symbol));
+    let maf_gene = sorted
+        .iter()
+        .find(|a| has_symbol(a))
+        .map(|a| field(a, i_symbol));
 
     // vcf2maf.pl:888, then :891, then :893. The two --custom-enst branches (:883, :886)
     // have no equivalent here — this tool exposes no isoform override.
@@ -947,7 +952,10 @@ pub fn write_tsv_rows<W: Write>(
                                     let expected_header =
                                         format!("{}_{}", sample.sample_name, format_key);
                                     if expected_header == *header {
-                                        found_value = sample.format_fields.get(format_key).map(|s| s.as_str());
+                                        found_value = sample
+                                            .format_fields
+                                            .get(format_key)
+                                            .map(|s| s.as_str());
                                         break;
                                     }
                                 }
@@ -1143,30 +1151,31 @@ pub fn reformat_vcf_data_with_header_parallel_chunked(
 }
 
 /// Extract values from a record in the same order as headers
-fn extract_values_from_record<'a>(record: &'a ReformattedVcfRecord, headers: &[String]) -> Vec<Cow<'a, str>> {
+fn extract_values_from_record<'a>(
+    record: &'a ReformattedVcfRecord,
+    headers: &[String],
+) -> Vec<Cow<'a, str>> {
     let dot = ".";
     headers
         .iter()
-        .map(|header| {
-            match header.as_str() {
-                "CHROM" => Cow::Borrowed(record.chromosome.as_str()),
-                "POS" => Cow::Owned(record.position.to_string()),
-                "ID" => Cow::Borrowed(record.id.as_deref().unwrap_or(dot)),
-                "REF" => Cow::Borrowed(record.reference.as_str()),
-                "ALT" => Cow::Borrowed(record.alternate.as_str()),
-                "QUAL" => match record.quality {
-                    Some(q) => Cow::Owned(q.to_string()),
-                    None => Cow::Borrowed(dot),
-                },
-                "FILTER" => Cow::Borrowed(record.filter.as_str()),
-                _ => {
-                    if let Some(value) = record.info_fields.get(header) {
-                        Cow::Borrowed(value.as_str())
-                    } else if let Some(sample_data) = &record.format_sample_data {
-                        extract_sample_value_for_header_cow(sample_data, header)
-                    } else {
-                        Cow::Borrowed(dot)
-                    }
+        .map(|header| match header.as_str() {
+            "CHROM" => Cow::Borrowed(record.chromosome.as_str()),
+            "POS" => Cow::Owned(record.position.to_string()),
+            "ID" => Cow::Borrowed(record.id.as_deref().unwrap_or(dot)),
+            "REF" => Cow::Borrowed(record.reference.as_str()),
+            "ALT" => Cow::Borrowed(record.alternate.as_str()),
+            "QUAL" => match record.quality {
+                Some(q) => Cow::Owned(q.to_string()),
+                None => Cow::Borrowed(dot),
+            },
+            "FILTER" => Cow::Borrowed(record.filter.as_str()),
+            _ => {
+                if let Some(value) = record.info_fields.get(header) {
+                    Cow::Borrowed(value.as_str())
+                } else if let Some(sample_data) = &record.format_sample_data {
+                    extract_sample_value_for_header_cow(sample_data, header)
+                } else {
+                    Cow::Borrowed(dot)
                 }
             }
         })
@@ -1174,7 +1183,10 @@ fn extract_values_from_record<'a>(record: &'a ReformattedVcfRecord, headers: &[S
 }
 
 /// Helper function to extract sample values by header name, returning Cow to avoid cloning
-fn extract_sample_value_for_header_cow<'a>(sample_data: &'a ParsedFormatSample, header: &str) -> Cow<'a, str> {
+fn extract_sample_value_for_header_cow<'a>(
+    sample_data: &'a ParsedFormatSample,
+    header: &str,
+) -> Cow<'a, str> {
     for sample in &sample_data.samples {
         for format_key in &sample_data.format_keys {
             let expected_header = format!("{}_{}", sample.sample_name, format_key);
@@ -1194,10 +1206,16 @@ mod tests {
     use super::*;
 
     fn csq_fields() -> Vec<String> {
-        ["Consequence", "SYMBOL", "BIOTYPE", "CANONICAL", "cDNA_position"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "Consequence",
+            "SYMBOL",
+            "BIOTYPE",
+            "CANONICAL",
+            "cDNA_position",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     #[test]
@@ -1234,7 +1252,10 @@ mod tests {
             "intron_variant|LAMTOR5|protein_coding|YES|200/2000",
         ];
         let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
-        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("LAMTOR5"));
+        assert_eq!(
+            picked.get("CSQ_SYMBOL").map(String::as_str),
+            Some("LAMTOR5")
+        );
     }
 
     #[test]

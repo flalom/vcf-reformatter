@@ -18,9 +18,7 @@
 use clap::{Parser, ValueEnum};
 use essentials_fields::MafRecord;
 use reformat_vcf::{
-    reformat_vcf_data_with_header,
-    reformat_vcf_data_with_header_parallel,
-    AnnotationType,
+    reformat_vcf_data_with_header, reformat_vcf_data_with_header_parallel, AnnotationType,
     TranscriptHandling,
 };
 use std::path::Path;
@@ -391,8 +389,12 @@ fn note_multi_transcript(count: usize) {
             "ℹ️  Note: {count} site(s) carry more than one transcript annotation; -t first is in use."
         );
         eprintln!("   'first' reports the annotation listed first by the annotator, without re-ranking it,");
-        eprintln!("   so at those sites the consequence shown need not be the most damaging one present.");
-        eprintln!("   -t most-severe ranks by consequence severity; -t split keeps every transcript.");
+        eprintln!(
+            "   so at those sites the consequence shown need not be the most damaging one present."
+        );
+        eprintln!(
+            "   -t most-severe ranks by consequence severity; -t split keeps every transcript."
+        );
     }
 }
 
@@ -401,7 +403,9 @@ fn warn_about_malformed_annotations(count: usize, key: &str) {
         eprintln!(
             "⚠️  Warning: {count} {key} annotation entr(ies) carry fewer fields than the header declares."
         );
-        eprintln!("   Those entries are read as far as they go; the missing fields come out empty,");
+        eprintln!(
+            "   Those entries are read as far as they go; the missing fields come out empty,"
+        );
         eprintln!("   so affected variants are still converted — expect Unknown/blank annotation columns.");
     }
 }
@@ -424,7 +428,9 @@ fn main() {
 
     // Validate --parquet + --compress conflict
     if cli.parquet && cli.compress {
-        eprintln!("Error: Parquet has built-in compression; --compress is not needed with --parquet");
+        eprintln!(
+            "Error: Parquet has built-in compression; --compress is not needed with --parquet"
+        );
         std::process::exit(1);
     }
 
@@ -656,16 +662,15 @@ fn main() {
                 if cli.parquet && !headers.is_empty() {
                     let sink = match parquet_sink.as_mut() {
                         Some(sink) => sink,
-                        None => match parquet_writer::ParquetSink::create_tsv(
-                            &parquet_file,
-                            &headers,
-                        ) {
-                            Ok(sink) => parquet_sink.insert(sink),
-                            Err(e) => {
-                                eprintln!("❌ Error writing parquet file: {e}");
-                                std::process::exit(1);
+                        None => {
+                            match parquet_writer::ParquetSink::create_tsv(&parquet_file, &headers) {
+                                Ok(sink) => parquet_sink.insert(sink),
+                                Err(e) => {
+                                    eprintln!("❌ Error writing parquet file: {e}");
+                                    std::process::exit(1);
+                                }
                             }
-                        },
+                        }
                     };
                     if let Err(e) = sink.write_tsv(&records) {
                         eprintln!("❌ Error writing parquet file: {e}");
@@ -948,7 +953,10 @@ fn main() {
             );
 
             let total_time = total_start.elapsed();
-            println!("✅ MAF file written{}", if cli.compress { " (compressed)" } else { "" });
+            println!(
+                "✅ MAF file written{}",
+                if cli.compress { " (compressed)" } else { "" }
+            );
             println!();
 
             let timing = ProcessingTiming {
