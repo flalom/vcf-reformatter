@@ -1,0 +1,10 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=248956422>
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">
+##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	TUMOR
+chr1	1000	.	AT	A	50.0	PASS	DP=30;CSQ=-|frameshift_variant|HIGH|GENE1|ENSG001|Transcript|ENST001|protein_coding	GT:AD	0/1:20,10
+chr1	1001	.	T	*	40.0	PASS	DP=25;CSQ=*|upstream_gene_variant|MODIFIER|GENE1|ENSG001|Transcript|ENST001|protein_coding	GT:AD	0/1:15,10
+chr1	1002	.	G	*,A	45.0	PASS	DP=28;CSQ=A|missense_variant|MODERATE|GENE1|ENSG001|Transcript|ENST001|protein_coding	GT:AD	1/2:5,12,11
