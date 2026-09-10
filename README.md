@@ -203,6 +203,31 @@ vcf-reformatter input.vcf.gz --output-format maf --parquet
 # Parquet is on by default; build without it with
 cargo build --release --no-default-features
 ```
+### MAF Metadata and Sample Selection
+```shell script
+# Name the tumor sample explicitly. Without this the first sample declaring DP
+# is used, which is a guess and wrong on most multi-sample VCFs
+vcf-reformatter tumor_only.vcf.gz --output-format maf --tumor-id TUMOR_A
+
+# Tumor/normal pair: t_depth/t_ref_count/t_alt_count come from one sample,
+# n_depth/n_ref_count/n_alt_count and Matched_Norm_Sample_Barcode from the other
+vcf-reformatter paired.vcf.gz --output-format maf \
+  --tumor-id B487_1_V --normal-id B487_1_cOM
+
+# Sample names must match the #CHROM line exactly. Check them first:
+bcftools query -l paired.vcf.gz
+
+# Metadata a VCF cannot supply. These columns stay empty unless you set them
+vcf-reformatter sample.vcf.gz --output-format maf \
+  --center MySeqCenter \
+  --sample-barcode TCGA-AB-1234-01A \
+  --mutation-status Somatic \
+  --sequence-source WXS
+```
+A `--tumor-id` naming a sample that is not in the VCF yields empty depth columns rather than
+falling back to the pooled `INFO` counts, so a typo shows up as missing data rather than as the
+wrong sample's read counts.
+
 ### Advanced Usage
 ```shell script
 # High-performance processing with compression
