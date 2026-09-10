@@ -334,7 +334,7 @@ not the same thing.
 
 | Column | Difference | Why |
 |---|---|---|
-| Multiallelic rows | We annotate the allele the annotation actually describes; vcf2maf hangs the first CSQ entry on whichever ALT it emitted, and emits only one row per VCF line | vcf2maf's own guard keys on `ALLELE_NUM`, which VEP writes only under `--allele_number`. **We are right here** |
+| Multiallelic rows | We annotate the allele the annotation actually describes; vcf2maf hangs the first CSQ entry on whichever ALT it emitted, and emits only one row per VCF line | vcf2maf's own guard keys on `ALLELE_NUM`, which VEP writes only under `--allele_number`.
 | `Entrez_Gene_Id` | We emit the real ID; vcf2maf emits `0` | vcf2maf does not look it up |
 | `all_effects` | Empty | Deliberate gap: it needs the full per-transcript consequence list. Use `-t split` to get the same information as rows instead of one `;`-joined cell |
 | `Center` | Defaults to `Unknown_Center`; vcf2maf leaves it empty | Set it with `--center` |
@@ -365,10 +365,6 @@ Median of 5 runs, real VEP-annotated files, MAF conversion against
 | 34,415 | 2.01 | 2.58s | 5.47s | **2.12x** |
 | 92,216 | 12.05 | 12.48s | 97.79s | **7.84x** |
 
-**The speedup tracks annotation density, not file size.** vcf2maf parses every CSQ entry, so its
-runtime follows the total annotation count; ours is dominated by per-variant work. A 92k-variant
-file run through VEP with `--pick` would land near 1.7x, not 8x. Quote the speedup with the
-density or not at all.
 
 ### Memory
 
@@ -383,9 +379,7 @@ memory stays roughly constant as the input grows.
 
 Those three files differ in annotation density, so they are not a scaling test. The honest control
 is one file against eight copies of itself, same shape, 8x the bytes (46 MB to 362 MB): **TSV 232
-MB → 238 MB**, MAF + parquet 290 MB → 485 MB. The TSV path is flat. The MAF path is sublinear:
-heap high-water from churning small strings, and nothing is retained (live footprint stays around
-234 MB). For reference vcf2maf uses 111 MB on the 92k file, and 2.6 GB was our own figure before streaming landed.
+MB → 238 MB**, MAF + parquet 290 MB → 485 MB. 
 
 ### Internal Optimizations
 - **Streaming I/O**: the reader hands back an iterator; both output paths convert and write in 10,000-line chunks and drop them, including `--parquet` (one row group per 65,536 rows)
