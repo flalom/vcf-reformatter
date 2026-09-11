@@ -3676,3 +3676,78 @@ mod parquet_tests {
         assert_eq!(parquet_columns, MafRecord::get_maf_headers());
     }
 }
+
+#[test]
+fn test_report_both_formats() {
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let vcf = dir.path().join("both.vcf");
+    let mut f = File::create(&vcf).unwrap();
+    write!(
+        f,
+        "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t100\t.\tA\tG\t60\tPASS\tDP=50\n"
+    )
+    .unwrap();
+
+    let run = |report: &str, out: &std::path::Path| {
+        let output = Command::new("cargo")
+            .args([
+                "run",
+                "--",
+                vcf.to_str().unwrap(),
+                "--report",
+                report,
+                "-o",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to run vcf-reformatter");
+        assert!(
+            output.status.success(),
+            "--report {report} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    let both = dir.path().join("both_out");
+    run("html,txt", &both);
+    assert!(both.join("both_summary.txt").exists(), "txt report missing");
+    assert!(
+        both.join("both_summary.html").exists(),
+        "html report missing"
+    );
+
+    // --report-dir sends the report somewhere else; the data output stays under -o.
+    let data = dir.path().join("split_data");
+    let reports = dir.path().join("split_reports");
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--",
+            vcf.to_str().unwrap(),
+            "--report",
+            "html,txt",
+            "-o",
+            data.to_str().unwrap(),
+            "--report-dir",
+            reports.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run vcf-reformatter");
+    assert!(
+        output.status.success(),
+        "--report-dir failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reports.join("both_summary.txt").exists());
+    assert!(reports.join("both_summary.html").exists());
+    assert!(!data.join("both_summary.html").exists());
+    assert!(data.join("both_reformatted.tsv").exists());
+
+    // `none` in the list wins over any format listed with it.
+    let none = dir.path().join("none_out");
+    run("html,none", &none);
+    assert!(!none.join("both_summary.txt").exists());
+    assert!(!none.join("both_summary.html").exists());
+}

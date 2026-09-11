@@ -716,29 +716,102 @@ pub fn reformat_vcf_data_with_header(
         }
     }
 
-    let headers = generate_headers_from_records(&all_records, &column_names_vec);
+    let headers = generate_headers_from_records(&all_records, &column_names_vec, header);
 
     Ok((headers, all_records))
 }
 
-/// Generate column headers from the first reformatted record
+/// The `##INFO=<ID=…` / `##FORMAT=<ID=…` ids a VCF header declares, in declaration order.
+fn declared_ids(vcf_header: &str, kind: &str) -> Vec<String> {
+    let needle = format!("##{kind}=<ID=");
+    vcf_header
+        .lines()
+        .filter_map(|line| line.strip_prefix(needle.as_str()))
+        .map(|rest| {
+            rest.split([',', '>'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+/// Generate column headers from the first reformatted record, plus every INFO and FORMAT field
+/// the VCF header declares that this record happens not to carry.
+///
+/// Deriving the column list from record #1 alone silently drops any key absent from it — measured
+/// on real files: 73% of rows losing `LOF`/`NMD` (SnpEff), 27% losing `PON`/`STR`/`RU` and 34%
+/// losing the `PGT`/`PID`/`PS` phasing trio (Mutect2). Rows are rendered by header name, so the
+/// cost of a declared-but-unused field is one column of `.`, never a shifted row.
+///
+/// CSQ/ANN sub-fields are positional and therefore always complete on every record, so only INFO
+/// and FORMAT need the header pass.
 fn generate_headers_from_records(
     records: &[ReformattedVcfRecord],
     column_names_vec: &[&str],
+    vcf_header: &str,
 ) -> Vec<String> {
-    if let Some(first_record) = records.first() {
-        let sample_names: Vec<String> = if column_names_vec.len() > 9 {
-            column_names_vec[9..]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            vec![]
-        };
-        generate_headers_from_record(first_record, &sample_names)
+    let Some(first_record) = records.first() else {
+        return vec![];
+    };
+    let sample_names: Vec<String> = if column_names_vec.len() > 9 {
+        column_names_vec[9..]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         vec![]
+    };
+
+    let base = generate_headers_from_record(first_record, &sample_names);
+    let (fixed, rest) = base.split_at(FIXED_COLUMNS.len());
+
+    // INFO block: the union, still alphabetical, so existing columns keep their position.
+    let mut info: Vec<String> = declared_ids(vcf_header, "INFO")
+        .into_iter()
+        .filter(|id| id != "CSQ" && id != "ANN")
+        .map(|id| format!("INFO_{}", sanitize_field_name(&id)))
+        .collect();
+    info.extend(rest.iter().filter(|h| h.starts_with("INFO_")).cloned());
+    info.sort();
+    info.dedup();
+
+    let annotation: Vec<String> = rest
+        .iter()
+        .filter(|h| h.starts_with("CSQ_") || h.starts_with("ANN_"))
+        .cloned()
+        .collect();
+
+    // Sample block: this record's FORMAT keys first, then the declared ones it lacks.
+    let declared_format = declared_ids(vcf_header, "FORMAT");
+    let sample_block: Vec<&String> = rest
+        .iter()
+        .filter(|h| !h.starts_with("INFO_") && !h.starts_with("CSQ_") && !h.starts_with("ANN_"))
+        .collect();
+    let mut samples = Vec::new();
+    for name in &sample_names {
+        let prefix = format!("{name}_");
+        let existing: Vec<String> = sample_block
+            .iter()
+            .filter(|h| h.starts_with(&prefix))
+            .map(|h| (*h).clone())
+            .collect();
+        samples.extend(existing.iter().cloned());
+        for key in &declared_format {
+            let column = format!("{prefix}{key}");
+            if !existing.contains(&column) {
+                samples.push(column);
+            }
+        }
     }
+
+    let mut headers = fixed.to_vec();
+    headers.extend(info);
+    headers.extend(annotation);
+    headers.extend(samples);
+    headers
 }
 /// Parallel version of VCF data reformatting for improved performance on large files
 ///
@@ -803,25 +876,19 @@ pub fn reformat_vcf_data_with_header_parallel(
         flattened_records.append(&mut records);
     }
 
-    let headers = generate_headers_from_records(&flattened_records, &column_names_vec);
+    let headers = generate_headers_from_records(&flattened_records, &column_names_vec, header);
 
     Ok((headers, flattened_records))
 }
 
 // FIXED: Update to handle both CSQ and ANN headers
+const FIXED_COLUMNS: [&str; 7] = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER"];
+
 fn generate_headers_from_record(
     record: &ReformattedVcfRecord,
     _sample_names: &[String],
 ) -> Vec<String> {
-    let mut headers = vec![
-        "CHROM".to_string(),
-        "POS".to_string(),
-        "ID".to_string(),
-        "REF".to_string(),
-        "ALT".to_string(),
-        "QUAL".to_string(),
-        "FILTER".to_string(),
-    ];
+    let mut headers: Vec<String> = FIXED_COLUMNS.iter().map(|c| c.to_string()).collect();
 
     let mut info_keys: Vec<String> = record
         .info_fields
@@ -1120,7 +1187,8 @@ pub fn reformat_vcf_data_with_header_parallel_chunked(
 
         // Generate headers from first non-empty chunk only
         if !headers_generated && !chunk_records.is_empty() {
-            output_headers = generate_headers_from_records(&chunk_records, &column_names_vec);
+            output_headers =
+                generate_headers_from_records(&chunk_records, &column_names_vec, header);
 
             // Write headers to output
             writeln!(output_writer, "{}", output_headers.join("\t"))?;
@@ -1297,5 +1365,37 @@ mod tests {
             picked.get("CSQ_Consequence").map(String::as_str),
             Some("stop_gained")
         );
+    }
+
+    #[test]
+    fn headers_cover_fields_the_first_record_lacks() {
+        // Record 1 carries DP and GT only; the header also declares LOF, PGT and an unused SB.
+        let header = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n##INFO=<ID=LOF,Number=.,Type=String,Description=\"Loss of function\">\n##INFO=<ID=SB,Number=1,Type=Integer,Description=\"Never used\">\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n##FORMAT=<ID=PGT,Number=1,Type=String,Description=\"Phasing\">\n";
+        let column_names = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1";
+        let lines = vec![
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=30\tGT\t0/1".to_string(),
+            "chr1\t200\t.\tC\tT\t60\tPASS\tDP=40;LOF=(X|X|1|1.00)\tGT:PGT\t0/1:0|1".to_string(),
+        ];
+
+        let (headers, _records) = reformat_vcf_data_with_header(
+            header,
+            column_names,
+            &lines,
+            TranscriptHandling::FirstOnly,
+        )
+        .unwrap();
+
+        // Present on record 2 only — dropped entirely before the header pass.
+        assert!(headers.contains(&"INFO_LOF".to_string()));
+        assert!(headers.contains(&"S1_PGT".to_string()));
+        // Declared but never used: one empty column is the price, not a missing one.
+        assert!(headers.contains(&"INFO_SB".to_string()));
+        // Nothing lost, nothing duplicated.
+        assert!(headers.contains(&"INFO_DP".to_string()));
+        assert!(headers.contains(&"S1_GT".to_string()));
+        let mut sorted = headers.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), headers.len(), "duplicate column names");
     }
 }

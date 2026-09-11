@@ -492,7 +492,7 @@ if run flags; then
     [[ "$n" -gt 0 ]] && st=PASS || st=FAIL
     row flags unannotated/rows "$n" "$st" "still converts, just without annotation columns"
     eq flags multisample/exit_code \
-        "$(rc "$BIN" "$MULTISAMPLE" -o "$WORK" -p fl_multi --report none)" 0 "72k variants, 115 columns"
+        "$(rc "$BIN" "$MULTISAMPLE" -o "$WORK" -p fl_multi --report none)" 0 "72k variants, 119 columns"
     n=$(( $(wc -l < "$WORK/fl_multi_reformatted.tsv") - 1 ))
     [[ "$n" -gt 0 ]] && st=PASS || st=FAIL
     row flags multisample/rows "$n" "$st" ""

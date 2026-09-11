@@ -11,7 +11,7 @@ keywords = ["vcf", "bioinformatics", "vep", "snpeff", "maf"]
 categories = ["science", "command-line-utilities"]
 readme = "README.md"
 include = [
-    "src/**/*.rs",
+    "src/[a-z]*.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE",

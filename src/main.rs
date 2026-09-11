@@ -186,9 +186,13 @@ struct Cli {
     #[arg(long)]
     normal_id: Option<String>,
 
-    /// Report format: html (default), txt, or none (no report generated)
-    #[arg(long, value_enum, default_value_t = ReportFormatCli::Html)]
-    report: ReportFormatCli,
+    /// Report format: html (default), txt, or none. Comma-separate for both: --report html,txt
+    #[arg(long, value_enum, value_delimiter = ',', default_value = "html")]
+    report: Vec<ReportFormatCli>,
+
+    /// Directory for the report file (default: --output-dir)
+    #[arg(long)]
+    report_dir: Option<String>,
 
     /// Also write an Apache Parquet copy of the output, alongside the text file
     #[arg(long)]
@@ -242,6 +246,13 @@ enum ReportFormatCli {
     /// No report file
     #[value(name = "none")]
     None,
+}
+
+impl Cli {
+    /// `--report none` anywhere wins; otherwise a format is written if it was listed.
+    fn wants_report(&self, format: ReportFormatCli) -> bool {
+        !self.report.contains(&ReportFormatCli::None) && self.report.contains(&format)
+    }
 }
 
 impl From<AnnotationTypeCli> for AnnotationType {
@@ -652,7 +663,7 @@ fn main() {
                         .entry(record.chromosome.clone())
                         .or_insert(0) += 1;
                 }
-                if cli.report == ReportFormatCli::Html {
+                if cli.wants_report(ReportFormatCli::Html) {
                     summary::merge_damage_breakdowns(
                         &mut damage_breakdowns,
                         summary::compute_damage_breakdowns(&records),
@@ -869,7 +880,7 @@ fn main() {
                     transcript_handling,
                     verbose: cli.verbose && input_variants <= STREAM_CHUNK,
                     use_parallel,
-                    compute_damage: cli.report == ReportFormatCli::Html,
+                    compute_damage: cli.wants_report(ReportFormatCli::Html),
                 };
                 let (mut records, breakdowns) = match convert_to_maf_records(&params) {
                     Ok(result) => result,
@@ -980,6 +991,15 @@ fn main() {
 /// Build an output path under `cli.output_dir`, using `cli.prefix` (or the
 /// input file's stem) as the base name, creating the directory if needed.
 fn output_path(cli: &Cli, suffix: &str, extension: &str) -> String {
+    output_path_in(
+        cli,
+        cli.output_dir.as_deref().unwrap_or("."),
+        suffix,
+        extension,
+    )
+}
+
+fn output_path_in(cli: &Cli, output_dir: &str, suffix: &str, extension: &str) -> String {
     let base_name = if cli.input_file == "-" {
         "stdin"
     } else {
@@ -991,7 +1011,6 @@ fn output_path(cli: &Cli, suffix: &str, extension: &str) -> String {
         base_name.strip_suffix(".vcf").unwrap_or(base_name)
     };
 
-    let output_dir = cli.output_dir.as_deref().unwrap_or(".");
     let prefix = cli.prefix.as_deref().unwrap_or(base_name);
 
     if let Err(e) = std::fs::create_dir_all(output_dir) {
@@ -1112,11 +1131,14 @@ fn generate_output_filenames(cli: &Cli) -> (String, String) {
 }
 
 fn generate_summary_filename(cli: &Cli, extension: &str) -> String {
-    output_path(cli, "_summary", extension)
+    match cli.report_dir.as_deref() {
+        Some(dir) => output_path_in(cli, dir, "_summary", extension),
+        None => output_path(cli, "_summary", extension),
+    }
 }
 
 /// The same report, built from counters instead of the retained input lines — which is what a
-/// streaming path has. `write_summary_if_requested` is the collect-everything caller.
+/// streaming path has. It is the only place a report file is written.
 #[allow(clippy::too_many_arguments)]
 fn write_summary_from_counts(
     cli: &Cli,
@@ -1128,7 +1150,7 @@ fn write_summary_from_counts(
     variants_per_sec: f64,
     damage_breakdowns: Vec<summary::DamageBreakdown>,
 ) {
-    if cli.report == ReportFormatCli::None {
+    if !cli.wants_report(ReportFormatCli::Txt) && !cli.wants_report(ReportFormatCli::Html) {
         return;
     }
     let input_chrom_counts = summary::sort_chromosomes(input_chrom_counts);
@@ -1156,25 +1178,22 @@ fn write_summary_from_counts(
         variants_per_sec,
     };
 
-    match cli.report {
-        ReportFormatCli::None => {}
-        ReportFormatCli::Txt => {
-            let summary_file = generate_summary_filename(cli, "txt");
-            if let Err(e) = summary_stats.write_to_file(&summary_file) {
-                eprintln!("Warning: Could not write summary file: {}", e);
-            } else {
-                println!("Summary written to: {}", summary_file);
-            }
+    if cli.wants_report(ReportFormatCli::Txt) {
+        let summary_file = generate_summary_filename(cli, "txt");
+        if let Err(e) = summary_stats.write_to_file(&summary_file) {
+            eprintln!("Warning: Could not write summary file: {}", e);
+        } else {
+            println!("Summary written to: {}", summary_file);
         }
-        ReportFormatCli::Html => {
-            let summary_file = generate_summary_filename(cli, "html");
-            if let Err(e) =
-                html_report::write_html_report(&summary_stats, &damage_breakdowns, &summary_file)
-            {
-                eprintln!("Warning: Could not write summary report: {}", e);
-            } else {
-                println!("Summary report written to: {}", summary_file);
-            }
+    }
+    if cli.wants_report(ReportFormatCli::Html) {
+        let summary_file = generate_summary_filename(cli, "html");
+        if let Err(e) =
+            html_report::write_html_report(&summary_stats, &damage_breakdowns, &summary_file)
+        {
+            eprintln!("Warning: Could not write summary report: {}", e);
+        } else {
+            println!("Summary report written to: {}", summary_file);
         }
     }
 }

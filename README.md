@@ -118,7 +118,7 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
     - `vcf-reformatter-v0.7.5-linux-x86_64-static` → **HPC clusters** (works everywhere)
     - `vcf-reformatter-v0.7.5-windows-x86_64.exe` → **Windows**
     - `vcf-reformatter-v0.7.5-macos-x86_64` → **Intel Mac**
-    - `vcf-reformatter-v0.7.5-macos-arm64` → **Apple Silicon Mac** (M1/M2/M3/M4)
+    - `vcf-reformatter-v0.7.5-macos-arm64` → **Apple Silicon Mac** (all M-series)
 
 3. **Make executable and run:**
 ````bash
@@ -190,6 +190,12 @@ vcf-reformatter input.vcf.gz
 
 # Plain-text report instead of HTML
 vcf-reformatter input.vcf.gz --report txt
+
+# Both formats from one pass
+vcf-reformatter input.vcf.gz --report html,txt
+
+# Collect reports somewhere else than the data output
+vcf-reformatter input.vcf.gz -o results/ --report-dir reports/
 
 # No report file
 vcf-reformatter input.vcf.gz --report none
@@ -273,6 +279,9 @@ Options:
                                     [values: html, txt, none]
                                     html: stat cards + SIFT/PolyPhen/Impact charts
                                     txt:  plain text, no damage breakdown
+                                    comma-separate for both: --report html,txt
+                                    none anywhere in the list wins
+      --report-dir <DIR>           Directory for the report [default: --output-dir]
       --parquet                    Also write an Apache Parquet copy alongside
                                    the text output (mutually exclusive with -c)
       --tumor-id <NAME>            Tumor sample name as it appears in #CHROM.
@@ -428,7 +437,7 @@ vcf-reformatter input.vcf.gz -t split -j 0 -c -v
 ### File Structure
 - `{prefix}_header.txt`: original VCF header and metadata (TSV mode only)
 - `{prefix}_reformatted.tsv`: flattened tabular data (or `_reformatted.maf` with `--output-format maf`)
-- `{prefix}_summary.html`: processing report, unless `--report txt|none`
+- `{prefix}_summary.html`: processing report, unless `--report txt|none` (`--report html,txt` writes both `_summary.html` and `_summary.txt`)
 - `{prefix}_reformatted.tsv.parquet`: with `--parquet`, written *alongside* the text file, never instead of it
 
 Reading from stdin (`-`) with no `--prefix` names the outputs `stdin_*`.
@@ -445,6 +454,11 @@ across 35.9M cells.
 3. **VEP Annotations**: `CSQ_Allele`, `CSQ_Consequence`, `CSQ_SYMBOL`, `CSQ_Gene`, etc.
 3. **SnpEff Annotations**: `ANN_Allele`, `ANN_Annotation_Impact`, `ANN_Gene_Name`, `ANN_Distance`, etc.
 4. **Sample Data**: `SAMPLE1_GT`, `SAMPLE1_DP`, `SAMPLE1_AD`, etc.
+
+The INFO and FORMAT columns come from the VCF header's own `##INFO` / `##FORMAT` declarations, so a
+field that only appears on later variants still gets a column — a caller that writes `LOF` on 251
+of 29,589 variants, or `PGT`/`PID`/`PS` on a third of them, is not silently dropped. A declared
+field that never occurs costs one column of `.`.
 
 ### Example Output VEP
 ```
