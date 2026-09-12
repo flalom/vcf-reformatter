@@ -306,6 +306,16 @@ fn build_metric_breakdown(
 /// Fold one chunk's breakdowns into an accumulator, so a file can be summarised without ever
 /// holding all of its records at once. Summing counts per chromosome per category is the whole
 /// operation — the result must equal `compute_damage_breakdowns` over the concatenated input.
+/// The severity order a metric's categories are meant to be rendered in.
+fn known_categories_for(metric_name: &str) -> &'static [&'static str] {
+    match metric_name {
+        "SIFT" => &SIFT_CATEGORIES,
+        "PolyPhen" => &POLYPHEN_CATEGORIES,
+        "Impact" => &IMPACT_CATEGORIES,
+        _ => &[],
+    }
+}
+
 pub fn merge_damage_breakdowns(acc: &mut Vec<DamageBreakdown>, next: Vec<DamageBreakdown>) {
     for incoming in next {
         match acc
@@ -318,6 +328,15 @@ pub fn merge_damage_breakdowns(acc: &mut Vec<DamageBreakdown>, next: Vec<DamageB
                         existing.categories.push(cat);
                     }
                 }
+                // Appending would leave a category first seen in a later chunk at the end,
+                // and the chart colours the list by position: a chunk holding only
+                // `tolerated` would paint it with the most-severe colour.
+                let known = known_categories_for(&existing.metric_name);
+                existing.categories.sort_by(|a, b| {
+                    let rank =
+                        |c: &String| known.iter().position(|k| k == c).unwrap_or(known.len());
+                    rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+                });
                 for (chrom, counts) in incoming.per_chrom_counts {
                     let entry = existing.per_chrom_counts.entry(chrom).or_default();
                     for (cat, n) in counts {
@@ -610,7 +629,23 @@ mod tests {
         for (m, w) in merged.iter().zip(whole.iter()) {
             assert_eq!(m.metric_name, w.metric_name);
             assert_eq!(m.per_chrom_counts, w.per_chrom_counts);
+            assert_eq!(m.categories, w.categories);
         }
+    }
+
+    /// The chart colours categories by their position in this list, so a category first
+    /// seen in a later chunk has to fall back into severity order, not sit at the end.
+    #[test]
+    fn merging_restores_severity_order_when_a_chunk_sees_only_the_mild_category() {
+        let first = vec![make_record("chr1", &[("CSQ_SIFT", "tolerated(0.4)")])];
+        let second = vec![make_record("chr2", &[("CSQ_SIFT", "deleterious(0.01)")])];
+
+        let mut merged = Vec::new();
+        merge_damage_breakdowns(&mut merged, compute_damage_breakdowns(&first));
+        merge_damage_breakdowns(&mut merged, compute_damage_breakdowns(&second));
+
+        let sift = merged.iter().find(|b| b.metric_name == "SIFT").unwrap();
+        assert_eq!(sift.categories, vec!["deleterious", "tolerated"]);
     }
 
     #[test]

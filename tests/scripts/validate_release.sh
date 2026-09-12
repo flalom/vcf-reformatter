@@ -31,10 +31,28 @@ row() { printf '%s\t%s\t%s\t%s\t%s\n' "$@" >> "$R"; }
 eq() { local st; [[ "$3" == "$4" ]] && st=PASS || st=FAIL; row "$1" "$2" "$3" "$st" "$5"; }
 # exit code of a command that is allowed to fail under set -e
 rc() { local c=0; "$@" >/dev/null 2>&1 || c=$?; echo "$c"; }
-# peak resident MB of one run; its stdout is noise here
+# peak resident MB of one run; its stdout is noise here.
+# BSD time (macOS) prints bytes under -l, GNU time prints kbytes under -f %M, and
+# the two flag sets are mutually unintelligible. Detected once, here.
+if /usr/bin/time -l true >/dev/null 2>&1; then
+    TIME_MODE=bsd
+elif /usr/bin/time -f %M true >/dev/null 2>&1; then
+    TIME_MODE=gnu
+else
+    TIME_MODE=none
+fi
 peak_rss() {
-    /usr/bin/time -l "$@" >/dev/null 2> "$WORK/rss.err" || true
-    awk '/maximum resident set size/{print int($1/1048576); exit}' "$WORK/rss.err"
+    case "$TIME_MODE" in
+        bsd)
+            /usr/bin/time -l "$@" >/dev/null 2> "$WORK/rss.err" || true
+            awk '/maximum resident set size/{print int($1/1048576); exit}' "$WORK/rss.err"
+            ;;
+        gnu)
+            /usr/bin/time -o "$WORK/rss.err" -f %M "$@" >/dev/null 2>&1 || true
+            awk 'NR==1{print int($1/1024); exit}' "$WORK/rss.err"
+            ;;
+        *) ;;  # unmeasurable: echo nothing, and callers must treat that as a failure
+    esac
 }
 
 VEP_SMALL="$ROOT/data/B505_V_1/B505_1_V.mutect2.filtered_VEP.ann.vcf.gz"   # 12,239, --pick'd
@@ -324,9 +342,16 @@ if run memory; then
         # per record churns the heap — its live footprint stays flat, so this is
         # allocator high-water, not retention. 2x buys room for that without hiding a
         # path that has started holding the file again.
-        eq memory "$mode/sublinear_in_input_size" \
-            "$([[ ${big:-0} -le $(( ${small:-1} * 2 )) ]] && echo 1 || echo 0)" 1 \
-            "8x input, ${small}MB -> ${big}MB"
+        # An unmeasured run must fail here. Defaulting the two numbers would make
+        # "0 <= 2" true and report a pass for a check that measured nothing.
+        st=FAIL
+        if [[ -z "${small:-}" || -z "${big:-}" ]]; then
+            note="no usable /usr/bin/time, nothing measured"
+        else
+            note="8x input, ${small}MB -> ${big}MB"
+            [[ $big -le $((small * 2)) ]] && st=PASS
+        fi
+        row memory "$mode/sublinear_in_input_size" "${small:-?}/${big:-?}" "$st" "$note"
     done
     rm -f "$eight"
 fi
@@ -586,11 +611,11 @@ if run edge; then
         done
     done
 
-    # A header-only VCF: exits 0, and the output carries no header row either, because
-    # columns are derived from record #1 and there is none. Recorded, not asserted — the
-    # plan expected a header-only output file.
-    row edge "empty/tsv_lines" "$(wc -l < "$WORK/edge_empty_tsv_reformatted.tsv" | tr -d ' ')" \
-        INFO "0 = no column header either; columns come from record #1, which does not exist"
+    # A header-only VCF exits 0 and writes exactly the column header, derived from the
+    # VCF's own ##INFO/##FORMAT declarations. It used to write a zero-byte file, which no
+    # reader can open and which a pipeline cannot tell apart from a run that never happened.
+    eq edge "empty/tsv_lines" "$(wc -l < "$WORK/edge_empty_tsv_reformatted.tsv" | tr -d ' ')" 1 \
+        "the column header and no data rows"
 
     # The documented remedy for the one non-zero exit must actually work.
     code=0

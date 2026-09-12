@@ -394,6 +394,32 @@ fn warn_about_multiallelic(count: usize) {
     }
 }
 
+/// MAF from SnpEff's ANN has no ground truth behind it: vcf2maf cannot read ANN at all,
+/// so the field-level accuracy the VEP path proved column by column is unproven here.
+/// Loud on purpose, and only when a run would actually produce such a MAF.
+fn warn_snpeff_maf_is_beta(header: &str, requested: AnnotationTypeCli) {
+    let uses_snpeff = match requested {
+        AnnotationTypeCli::SnpEff => true,
+        AnnotationTypeCli::Vep => false,
+        // Auto resolves to SnpEff only when ANN is the one annotation present.
+        AnnotationTypeCli::Auto => {
+            header.contains("##INFO=<ID=ANN") && !header.contains("##INFO=<ID=CSQ")
+        }
+    };
+    if !uses_snpeff {
+        return;
+    }
+    eprintln!(
+        "\x1b[1;31m🚨 BETA: MAF output from SnpEff (ANN) annotations is not validated.\x1b[0m"
+    );
+    eprintln!(
+        "\x1b[31m   vcf2maf cannot parse SnpEff's ANN field, so there is no ground truth to check"
+    );
+    eprintln!("   this path against. Its structure is verified (50 columns, correct header, depth");
+    eprintln!("   invariants) but individual field values are not independently confirmed.");
+    eprintln!("   Validation is planned for v0.8.0. For validated MAF output, use VEP-annotated input.\x1b[0m");
+}
+
 fn note_multi_transcript(count: usize) {
     if count > 0 {
         eprintln!(
@@ -525,6 +551,10 @@ fn main() {
         std::process::exit(1);
     }
 
+    if cli.output_format == OutputFormatCli::Maf {
+        warn_snpeff_maf_is_beta(&header, cli.annotation_type);
+    }
+
     let read_time = read_start.elapsed();
     println!("✅ Header read in {read_time:.2?}");
     println!("   📑 Header lines: {}", header.matches('\n').count());
@@ -645,7 +675,7 @@ fn main() {
                     }
                 };
 
-                if headers.is_empty() && !records.is_empty() {
+                if headers.is_empty() && !chunk_headers.is_empty() {
                     headers = chunk_headers;
                     if let Err(e) = reformat_vcf::write_tsv_header(&mut writer, &headers) {
                         eprintln!("❌ Error writing file: {e}");
@@ -695,11 +725,42 @@ fn main() {
                 }
             }
 
+            // A VCF with a header and no variants never enters the loop, so the column
+            // header is written here from the declarations alone. Without it the run
+            // produces a zero-byte TSV that no reader can open.
+            if headers.is_empty() {
+                if let Ok((declared, _)) = reformat_vcf::reformat_vcf_data_with_header(
+                    &header,
+                    &columns_title,
+                    &[],
+                    transcript_handling,
+                ) {
+                    headers = declared;
+                    if let Err(e) = reformat_vcf::write_tsv_header(&mut writer, &headers) {
+                        eprintln!("❌ Error writing file: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             if let Err(e) = writer.flush() {
                 eprintln!("❌ Error writing file: {e}");
                 std::process::exit(1);
             }
             drop(writer);
+
+            // Same for parquet: an empty file with the right schema beats no file, which a
+            // pipeline cannot tell apart from a run that never happened.
+            #[cfg(feature = "parquet_out")]
+            if cli.parquet && parquet_sink.is_none() && !headers.is_empty() {
+                match parquet_writer::ParquetSink::create_tsv(&parquet_file, &headers) {
+                    Ok(sink) => parquet_sink = Some(sink),
+                    Err(e) => {
+                        eprintln!("❌ Error writing parquet file: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
 
             let process_time = process_start.elapsed();
             let variants_per_sec = input_variants as f64 / process_time.as_secs_f64();
@@ -1070,7 +1131,7 @@ fn print_startup_info(
     _annotation_type: AnnotationType,
 ) {
     // Welcome messages
-    println!("🧬 VCF REFORMATTER v0.4.0");
+    println!("🧬 VCF REFORMATTER v{}", env!("CARGO_PKG_VERSION"));
     println!("═══════════════════════════");
     println!("📁 Input file: {}", cli.input_file);
     println!("🧵 Transcript handling: {:?}", transcript_handling);

@@ -748,14 +748,33 @@ fn declared_ids(vcf_header: &str, kind: &str) -> Vec<String> {
 ///
 /// CSQ/ANN sub-fields are positional and therefore always complete on every record, so only INFO
 /// and FORMAT need the header pass.
+/// The column list a VCF declares before any variant is seen: the fixed columns, then
+/// the CSQ/ANN sub-fields named in the annotation's own `Format:` string. The INFO and
+/// sample blocks are added by the caller, which already reads them from the header.
+fn headers_from_declarations_only(vcf_header: &str) -> Vec<String> {
+    let mut headers: Vec<String> = FIXED_COLUMNS.iter().map(|c| c.to_string()).collect();
+    // Gated on the declaration, because extract_ann_format_from_header falls back to a
+    // default SnpEff layout: without this, an unannotated VCF grows 16 phantom columns.
+    let declared = declared_ids(vcf_header, "INFO");
+    for (prefix, names) in [
+        ("CSQ", extract_csq_format_from_header(vcf_header)),
+        ("ANN", extract_ann_format_from_header(vcf_header)),
+    ] {
+        if !declared.iter().any(|id| id == prefix) {
+            continue;
+        }
+        for name in names.unwrap_or_default() {
+            headers.push(format!("{prefix}_{}", sanitize_field_name(&name)));
+        }
+    }
+    headers
+}
+
 fn generate_headers_from_records(
     records: &[ReformattedVcfRecord],
     column_names_vec: &[&str],
     vcf_header: &str,
 ) -> Vec<String> {
-    let Some(first_record) = records.first() else {
-        return vec![];
-    };
     let sample_names: Vec<String> = if column_names_vec.len() > 9 {
         column_names_vec[9..]
             .iter()
@@ -765,7 +784,12 @@ fn generate_headers_from_records(
         vec![]
     };
 
-    let base = generate_headers_from_record(first_record, &sample_names);
+    // With no records, every column still comes from the VCF header's own declarations,
+    // so a variant-free VCF gets a column header rather than a zero-byte file.
+    let base = match records.first() {
+        Some(first_record) => generate_headers_from_record(first_record, &sample_names),
+        None => headers_from_declarations_only(vcf_header),
+    };
     let (fixed, rest) = base.split_at(FIXED_COLUMNS.len());
 
     // INFO block: the union, still alphabetical, so existing columns keep their position.
@@ -1272,6 +1296,51 @@ fn extract_sample_value_for_header_cow<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A VCF with a header and no variants must still produce a column header, built
+    /// from the declarations alone, or the run writes a zero-byte file no reader opens.
+    #[test]
+    fn test_headers_come_from_declarations_when_there_are_no_records() {
+        let header = concat!(
+            "##fileformat=VCFv4.2\n",
+            "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n",
+            "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|SYMBOL\">\n",
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"gt\">\n",
+        );
+        let columns: Vec<&str> = "CHROM POS ID REF ALT QUAL FILTER INFO FORMAT TUMOR"
+            .split(' ')
+            .collect();
+
+        let headers = generate_headers_from_records(&[], &columns, header);
+        assert_eq!(
+            headers,
+            vec![
+                "CHROM",
+                "POS",
+                "ID",
+                "REF",
+                "ALT",
+                "QUAL",
+                "FILTER",
+                "INFO_DP",
+                "CSQ_Allele",
+                "CSQ_Consequence",
+                "CSQ_SYMBOL",
+                "TUMOR_GT",
+            ]
+        );
+    }
+
+    /// The ANN extractor falls back to a default SnpEff layout when the header declares
+    /// none, so the no-record path must gate on the declaration or invent 16 columns.
+    #[test]
+    fn test_no_records_and_no_annotation_declared_yields_only_fixed_columns() {
+        let header = "##fileformat=VCFv4.2\n";
+        let columns: Vec<&str> = "CHROM POS ID REF ALT QUAL FILTER INFO".split(' ').collect();
+
+        let headers = generate_headers_from_records(&[], &columns, header);
+        assert_eq!(headers, FIXED_COLUMNS.to_vec());
+    }
 
     fn csq_fields() -> Vec<String> {
         [
