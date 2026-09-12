@@ -2,7 +2,7 @@
 
 Did it ever happen that you had VCF files and you wanted to have a look at the data as you would do with a normal table? `VCF Reformatter` is here for your rescue!
 
-A Rust command-line tool for parsing and reformatting VCF (Variant Call Format) files, with support for VEP (Variant Effect Predictor) and SnpEff annotations. This tool flattens complex VCF files into tab-separated values (TSV) format for easier downstream analysis.
+A Rust command-line tool for parsing and reformatting VCF (Variant Call Format) files, with support for VEP (Variant Effect Predictor) and SnpEff annotations. This tool flattens complex VCF files into tab-separated values (TSV), parquet and MAF format for easier downstream analysis.
 Also incredibly useful for quick checks to your data!
 
 # VCF Reformatter
@@ -64,10 +64,11 @@ variants) in all three transcript modes, with **zero unexplained differences**. 
 their order match `vcf2maf.pl`'s own header. The remaining differences are named, counted and
 deliberate. See [Known divergences from vcf2maf](#known-divergences-from-vcf2maf).
 
-**SnpEff-annotated input: still beta.** vcf2maf cannot parse SnpEff's `ANN` field at all, so there
-is no ground truth to validate the SnpEff MAF path against yet. Its structure is checked (50
-columns, correct header, depth invariants hold) but its field-level accuracy is not independently
-confirmed. That validation lands in v0.8.0.
+> [!WARNING]
+> **SnpEff-annotated input: still beta.** vcf2maf cannot parse SnpEff's `ANN` field at all, so
+> there is no ground truth to validate the SnpEff MAF path against yet. Its structure is checked
+> (50 columns, correct header, depth invariants hold) but its field-level accuracy is not
+> independently confirmed. That validation lands in v0.8.0.
 
 **Multi-sample VCFs:** pass `--tumor-id` (and `--normal-id` if you have a matched normal). Without
 `--tumor-id` the first sample declaring `DP` is used, which is a guess.
@@ -101,7 +102,7 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 | 🚀 **Parallel Processing**              | Multi-threaded processing, 9k-17k variants/sec on real annotated files | Process large cohorts in minutes, not hours          |
 | 📁 **Native Compression**               | Direct `.vcf.gz` reading & gzip output           | Seamless workflow with compressed/uncompressed files |
 | 🎯 **Production Ready**                 | Comprehensive error handling & logging           | Reliable for automated pipelines                     |
-| 📋 **Summary Reports**                  | Per-chromosome variant distribution and processing stats | QC and reproducibility for pipeline logs             |
+| 📋 **Summary Reports**                  | `--report html,txt`: per-chromosome variant distribution and processing stats, and the HTML page adds SIFT/PolyPhen/IMPACT damage charts with no external assets | QC and reproducibility for pipeline logs, plus a page you can hand to a collaborator |
 | 📦 **Parquet Output**                   | Apache Parquet copy alongside the text output, ZSTD-compressed, typed columns | 3-6x smaller than raw text, 38x faster column reads in polars/DuckDB/R |
 | 🐳 **Container Support**                | Docker & Singularity ready                       | Deploy anywhere, from laptops to HPC clusters        |
 
@@ -139,21 +140,31 @@ cargo build --release
 ````
 
 ### Option 3: Docker
+Released images are published to Docker Hub for `linux/amd64` and `linux/arm64`.
 ```shell script
-# Build the container
-docker build -t vcf-reformatter .
+# Run the released image
+docker run --rm -v $(pwd):/data thefericcio/vcf-reformatter /data/sample.vcf.gz
 
-# Run with your data
+# Or build it yourself from this repo
+docker build -t vcf-reformatter .
 docker run --rm -v $(pwd):/data vcf-reformatter /data/sample.vcf.gz
 ```
-### Option 4: Singularity
+### Option 4: Apptainer / Singularity
+No definition file needed. The `.sif` is converted from the same image as Option 3, so nothing has
+to be built on the cluster.
 ```shell script
-# Build Singularity image
-singularity build vcf-reformatter.sif Singularity
+# Works on a login node: no Docker daemon, no root
+apptainer build vcf-reformatter.sif docker://thefericcio/vcf-reformatter:latest
 
 # Run on HPC cluster
-singularity run --bind $PWD:/data vcf-reformatter.sif /data/sample.vcf.gz -j 16
+apptainer run --bind $PWD:/data vcf-reformatter.sif /data/sample.vcf.gz -j 16
 ```
+To build a `.sif` from an unreleased working copy instead: `podman build -t vcf-reformatter .`,
+`podman save --format oci-archive -o vcf-reformatter.tar vcf-reformatter:latest`, then
+`apptainer build vcf-reformatter.sif oci-archive://vcf-reformatter.tar`.
+
+`singularity` works in place of `apptainer` throughout. Apptainer is the renamed fork of
+Singularity, and SingularityCE still uses the old command name.
 
 ## 🛠️ Usage
 
@@ -171,7 +182,11 @@ vcf-reformatter input.vcf.gz -t split
 # Read from stdin: plain or gzipped, auto-detected
 bcftools view -f PASS input.vcf.gz | vcf-reformatter - -p filtered
 cat input.vcf.gz | vcf-reformatter -
+
+# Split multiallelic sites before converting, so each ALT keeps its own annotation
+bcftools norm -m- input.vcf.gz | vcf-reformatter - --output-format maf -t most-severe
 ```
+Without `--prefix`, outputs from a pipe are named `stdin_*`.
 ### Annotation Type Detection
 ```shell script
 # Auto-detect annotation type (recommended)
@@ -230,9 +245,9 @@ vcf-reformatter sample.vcf.gz --output-format maf \
   --mutation-status Somatic \
   --sequence-source WXS
 ```
-A `--tumor-id` naming a sample that is not in the VCF yields empty depth columns rather than
-falling back to the pooled `INFO` counts, so a typo shows up as missing data rather than as the
-wrong sample's read counts.
+A `--tumor-id` naming a sample that is not in the VCF yields empty depth columns. It does not fall
+back to the pooled `INFO` counts, so a typo shows up as missing data instead of another sample's
+read counts.
 
 ### Advanced Usage
 ```shell script
@@ -411,14 +426,6 @@ memory stays roughly constant as the input grows.
 | 34,415 variants | 235 MB | 253 MB | 288 MB |
 | 92,216 variants | 330 MB | 397 MB | 442 MB |
 
-Those three files differ in annotation density, so they are not a scaling test. The honest control
-is one file against eight copies of itself, same shape, 8x the bytes (46 MB to 362 MB): **TSV 232
-MB → 238 MB**, MAF + parquet 290 MB → 485 MB. 
-
-### Internal Optimizations
-- **Streaming I/O**: the reader hands back an iterator; both output paths convert and write in 10,000-line chunks and drop them, including `--parquet` (one row group per 65,536 rows)
-- **Zero-copy output**: TSV and MAF output use borrowed references (`Cow<str>`) instead of cloning strings, reducing heap allocations per variant
-- **Move semantics**: Single-transcript variants (the common case) avoid all string cloning during record construction
 
 ### Optimization Tips
 ```shell script
@@ -444,21 +451,19 @@ Reading from stdin (`-`) with no `--prefix` names the outputs `stdin_*`.
 
 ### Parquet column types
 `POS`, `Start_Position`, `End_Position` and the depth columns are `uint64`; `QUAL` and `VAF` are
-`double`; everything else is a string. Unpopulated cells are real NULLs, ZSTD-compressed, one row
-group per 65,536 rows. Verified lossless against the sibling text output: 0 cell mismatches
-across 35.9M cells.
+`double`; everything else is a string. Unpopulated cells are real NULLs. ZSTD-compressed, with one
+row group per 65,536 rows so a column can be read back without scanning the whole file.
 
 ### Column Types
 1. **Standard VCF**: `CHROM`, `POS`, `ID`, `REF`, `ALT`, `QUAL`, `FILTER`
 2. **INFO Fields**: `INFO_DP`, `INFO_AF`, `INFO_AC`, etc.
 3. **VEP Annotations**: `CSQ_Allele`, `CSQ_Consequence`, `CSQ_SYMBOL`, `CSQ_Gene`, etc.
-3. **SnpEff Annotations**: `ANN_Allele`, `ANN_Annotation_Impact`, `ANN_Gene_Name`, `ANN_Distance`, etc.
-4. **Sample Data**: `SAMPLE1_GT`, `SAMPLE1_DP`, `SAMPLE1_AD`, etc.
+4. **SnpEff Annotations**: `ANN_Allele`, `ANN_Annotation_Impact`, `ANN_Gene_Name`, `ANN_Distance`, etc.
+5. **Sample Data**: `SAMPLE1_GT`, `SAMPLE1_DP`, `SAMPLE1_AD`, etc.
 
 The INFO and FORMAT columns come from the VCF header's own `##INFO` / `##FORMAT` declarations, so a
-field that only appears on later variants still gets a column — a caller that writes `LOF` on 251
-of 29,589 variants, or `PGT`/`PID`/`PS` on a third of them, is not silently dropped. A declared
-field that never occurs costs one column of `.`.
+field that none of the first variants happen to carry still gets a column instead of being silently
+dropped. A declared field that never occurs costs one column of `.`.
 
 ### Example Output VEP
 ```
@@ -508,31 +513,29 @@ shell: "vcf-reformatter {input.vcf} -t most-severe -j {threads} -o {params.outdi
 
 ### Docker
 ```shell script
-# Build once
-docker build -t vcf-reformatter .
-
-# Run anywhere
 docker run --rm \
   -v $(pwd):/data \
-  vcf-reformatter \
+  thefericcio/vcf-reformatter \
   /data/input.vcf.gz \
   -t most-severe -j 4 -o /data/results/ -c
 ```
+Anything the container must read or write needs its own `-v`, including the output directory.
 
-### Singularity (HPC)
+### Apptainer (HPC)
+Build the `.sif` first, see [Option 4](#option-4-apptainer--singularity).
 ```shell script
-# On HPC cluster
-singularity run \
+apptainer run \
   --bind $PWD:/data \
   --bind /scratch:/scratch \
   vcf-reformatter.sif \
   /data/large_cohort.vcf.gz \
   -t most-severe -j 16 -o /scratch/results/ -c -v
 ```
+Bind every filesystem in play. Writing results to `/scratch` requires `--bind /scratch`, as above.
 ## 🧪 Use Cases
 
-| Use Case | Command | Why It Works |
-|----------|---------|--------------|
+| Use Case | Command | Description |
+|----------|---------|-------------|
 | **Clinical Variant Review** | `vcf-reformatter variants.vcf.gz -t most-severe` | Prioritizes clinically relevant consequences |
 | **Population Analysis** | `vcf-reformatter cohort.vcf.gz -t first -j 0 -c` | Fast processing of large cohorts |
 | **Transcript Studies** | `vcf-reformatter genes.vcf.gz -t split -v` | Comprehensive transcript-level analysis |
@@ -547,7 +550,7 @@ singularity run \
 - ✅ **HTML report.** `--report html|txt|none`, a self-contained page with per-chromosome SIFT / PolyPhen / IMPACT charts
 - ✅ **Parquet alongside text.** ZSTD, typed columns, bounded row groups, streamed
 - ✅ **MAF correctness fixes.** HGVS accession stripping, splice-variant protein coordinates, shared REF/ALT prefix trimming, per-allele annotation on multiallelic sites, `dbSNP_RS` from VEP's `Existing_variation`
-- ✅ **195 tests** (97 unit + 98 integration) plus a release validation harness in `tests/scripts/`
+- ✅ **195 tests** plus a release validation harness in `tests/scripts/`
 
 ## Previous Releases
 ### 🚀 What's New in v0.4.0
@@ -575,6 +578,7 @@ singularity run \
 - ~~Streaming MAF output for large files✅~~
 - ~~Unified annotation parsing (deduplicate CSQ/ANN code paths)✅~~
 - Validate the SnpEff MAF path against a ground truth (v0.8.0)
+- ANNOVAR support (v0.9.0)
 - Populate `all_effects` (today: use `-t split`)
 - Enriched reports: Ti/Tv ratio, variant-type breakdown, filter distribution
 
@@ -653,9 +657,9 @@ ___
 
 <div align="center">
 
-**⭐ Star this repo if VCF Reformatter helps your research!**
+**⭐ Star this repo if VCF Reformatter helps your work!**
 
-Made with ❤️ by [Flavio Lombardo](https://github.com/flalom)
+Made with ❤️ by [Flavio Lombardo](https://github.com/flalom) | [Website](https://www.flaviolombardo.site/)
 
 </div>
 
