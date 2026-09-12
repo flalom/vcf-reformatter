@@ -10,7 +10,7 @@ Also incredibly useful for quick checks to your data!
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.70+-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.87+-blue.svg)](https://www.rust-lang.org)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Performance](https://img.shields.io/badge/performance-9k--17k%20variants%2Fsec-green.svg)]()
 [![Release](https://img.shields.io/github/v/release/flalom/vcf-reformatter)](https://github.com/flalom/vcf-reformatter/releases)

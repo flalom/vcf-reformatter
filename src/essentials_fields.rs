@@ -555,28 +555,37 @@ impl MafRecord {
                 .filter(|s| sample.is_none_or(|name| s.sample_name == name));
             for sample in candidates {
                 // Total depth (DP field)
-                if let Some(dp) = sample.format_fields.get("DP") {
-                    if let Ok(depth) = dp.parse::<u32>() {
-                        total_depth = Some(depth);
-                    }
-                }
+                let dp = sample
+                    .format_fields
+                    .get("DP")
+                    .and_then(|dp| dp.parse::<u32>().ok());
 
                 // Reference/alternative depth (AD field - usually comma-separated: ref,alt)
+                let mut ad_ref = None;
+                let mut ad_alt = None;
                 if let Some(ad) = sample.format_fields.get("AD") {
                     let depths: Vec<&str> = ad.split(',').collect();
-                    if let Some(r) = depths.first().and_then(|d| d.parse::<u32>().ok()) {
-                        ref_depth = Some(r);
-                    }
+                    ad_ref = depths.first().and_then(|d| d.parse::<u32>().ok());
                     if depths.len() >= 2 {
-                        if let Ok(alt_d) = depths[1].parse::<u32>() {
-                            alt_depth = Some(alt_d);
-                        }
+                        ad_alt = depths[1].parse::<u32>().ok();
                     }
                 }
 
-                // If we found depth in this sample, use it (typically first sample is tumor)
-                if total_depth.is_some() {
+                // All three columns must describe one sample, so the counts are only
+                // kept alongside the DP that selected it. Without this, a sample with
+                // AD but no DP leaves its counts next to a later sample's depth.
+                if dp.is_some() {
+                    total_depth = dp;
+                    ref_depth = ad_ref;
+                    alt_depth = ad_alt;
                     break;
+                }
+
+                // No sample has declared DP yet: remember the first AD seen, in case
+                // none ever does.
+                if ref_depth.is_none() && alt_depth.is_none() {
+                    ref_depth = ad_ref;
+                    alt_depth = ad_alt;
                 }
             }
 
@@ -1779,6 +1788,39 @@ mod tests {
         assert_eq!(total, Some(50));
         assert_eq!(refc, Some(30));
         assert_eq!(alt, Some(20));
+    }
+
+    /// A sample carrying AD but no usable DP must not leave its counts beside a later
+    /// sample's depth: all three columns describe one sample or none.
+    #[test]
+    fn test_depth_counts_come_from_the_sample_that_supplied_dp() {
+        use crate::extract_sample_info::{ParsedFormatSample, ParsedSample};
+        let sample = |name: &str, fields: Vec<(&str, &str)>| ParsedSample {
+            sample_name: name.to_string(),
+            format_fields: fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        };
+        // The first sample declares AD and no DP, the second declares DP and no AD.
+        let sample_data = Some(ParsedFormatSample {
+            format_keys: vec!["DP".to_string(), "AD".to_string()],
+            samples: vec![
+                sample("AD_ONLY", vec![("AD", "4,2")]),
+                sample("DP_ONLY", vec![("DP", "30")]),
+            ],
+        });
+
+        let (total, refc, alt) = MafRecord::extract_depth_for_sample(&sample_data, None);
+        assert_eq!(total, Some(30));
+        assert_eq!(
+            refc, None,
+            "AD_ONLY's counts must not sit beside DP_ONLY's depth"
+        );
+        assert_eq!(
+            alt, None,
+            "AD_ONLY's counts must not sit beside DP_ONLY's depth"
+        );
     }
 
     /// Two samples with the pooled INFO counts a real tumor/normal freebayes VCF carries.

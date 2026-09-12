@@ -55,7 +55,15 @@ pub fn read_vcf_gz(
 /// The peeked bytes are preserved via a `Chain`, so no data is lost.
 fn sniff_gzip_reader<R: Read + 'static>(mut source: R) -> io::Result<Box<dyn BufRead>> {
     let mut magic = [0u8; 2];
-    let bytes_read = source.read(&mut magic)?;
+    // A pipe can deliver one byte at a time; a single `read` returning 1 would
+    // misread gzip as plain text.
+    let mut bytes_read = 0;
+    while bytes_read < magic.len() {
+        match source.read(&mut magic[bytes_read..])? {
+            0 => break,
+            n => bytes_read += n,
+        }
+    }
     let chained = Cursor::new(magic[..bytes_read].to_vec()).chain(source);
 
     if bytes_read == 2 && magic == [0x1f, 0x8b] {

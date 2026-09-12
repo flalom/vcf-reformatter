@@ -8,7 +8,8 @@ pub(crate) fn extract_tag_regex(parsed_lines: &mut [String], tag: &str) -> Optio
     }
 
     let info_field = &parsed_lines[7];
-    let re = Regex::new(&format!(r"{tag}=([^;]+)")).ok()?;
+    // Anchor to an INFO key boundary, or `MYCSQ=` would match as `CSQ=`.
+    let re = Regex::new(&format!(r"(?:^|;){tag}=([^;]+)")).ok()?;
 
     let captures = re.captures(info_field)?;
     let value = captures.get(1)?.as_str().to_string();
