@@ -388,7 +388,7 @@ not the same thing.
 | `all_effects` | Empty | Deliberate gap: it needs the full per-transcript consequence list. Use `-t split` to get the same information as rows instead of one `;`-joined cell |
 | `Center` | Defaults to `Unknown_Center`; vcf2maf leaves it empty | Set it with `--center` |
 | `Strand` | Always `+` | Per the MAF spec the column is genomic, not the transcript strand (which is still in the TSV's `CSQ_STRAND`) |
-| `ALT=*` | Kept as a row typed `SNP`; vcf2maf drops the line | Accepted divergence |
+| `ALT=*` | Kept as a row typed `SNP`; vcf2maf drops the line | Divergence |
 | Symbolic ALTs (`<DEL>`, breakends) | Skipped in MAF, kept verbatim in TSV | MAF has no column that can hold one |
 
 ### Reproducing the validation
