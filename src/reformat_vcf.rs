@@ -13,7 +13,7 @@
 //! - Parallel processing support for large files
 //! - Flexible output formatting
 //! ```
-use crate::essentials_fields::MafRecord;
+use crate::essentials_fields::{biotype_priority, MafRecord};
 use crate::extract_ann_and_ann_names::extract_ann_regex;
 use crate::extract_csq_and_csq_names::extract_csq_regex;
 use crate::extract_sample_info::ParsedFormatSample;
@@ -21,6 +21,7 @@ use crate::get_info_from_header::{extract_ann_format_from_header, extract_csq_fo
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::{BufWriter, Write};
@@ -85,6 +86,7 @@ pub struct ReformattedVcfRecord {
     pub filter: String,
     pub info_fields: HashMap<String, String>,
     pub format_sample_data: Option<ParsedFormatSample>,
+    pub annotation_field_type: AnnotationFieldType,
 }
 
 impl ReformattedVcfRecord {
@@ -158,27 +160,68 @@ impl ReformattedVcfRecord {
             None
         };
 
-        let info_variants =
+        let (info_variants, annotation_field_type) =
             parse_info_field(info, csq_field_names, ann_field_names, transcript_handling)?;
 
-        let records: Vec<Self> = info_variants
-            .into_iter()
-            .map(|info_fields| Self {
-                chromosome: chromosome.clone(),
+        let len = info_variants.len();
+        let records: Vec<Self> = if len == 1 {
+            // Common case: single record, move values without cloning
+            vec![Self {
+                chromosome,
                 position,
-                id: id.clone(),
-                reference: reference.clone(),
-                alternate: alternate.clone(),
+                id,
+                reference,
+                alternate,
                 quality,
-                filter: filter.clone(),
-                info_fields,
-                format_sample_data: format_sample_data.clone(),
-            })
-            .collect();
+                filter,
+                info_fields: info_variants.into_iter().next().unwrap(),
+                format_sample_data,
+                annotation_field_type,
+            }]
+        } else {
+            // Multiple records: clone for all but the last, move for the last
+            let mut records = Vec::with_capacity(len);
+            let mut variants_iter = info_variants.into_iter().peekable();
+            while let Some(info_fields) = variants_iter.next() {
+                if variants_iter.peek().is_some() {
+                    records.push(Self {
+                        chromosome: chromosome.clone(),
+                        position,
+                        id: id.clone(),
+                        reference: reference.clone(),
+                        alternate: alternate.clone(),
+                        quality,
+                        filter: filter.clone(),
+                        info_fields,
+                        format_sample_data: format_sample_data.clone(),
+                        annotation_field_type,
+                    });
+                } else {
+                    records.push(Self {
+                        chromosome,
+                        position,
+                        id,
+                        reference,
+                        alternate,
+                        quality,
+                        filter,
+                        info_fields,
+                        format_sample_data,
+                        annotation_field_type,
+                    });
+                    break;
+                }
+            }
+            records
+        };
 
         Ok(records)
     }
 }
+
+/// One flattened record per transcript, plus which annotation field they came from.
+type ParsedInfoField = (Vec<HashMap<String, String>>, AnnotationFieldType);
+
 /// Parse the INFO field of a VCF record, extracting and processing annotations
 ///
 /// This function separates annotation data (CSQ/ANN) from standard INFO fields,
@@ -202,22 +245,23 @@ pub fn parse_info_field(
     csq_field_names: &Option<Vec<String>>,
     ann_field_names: &Option<Vec<String>>,
     transcript_handling: TranscriptHandling,
-) -> std::result::Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
+) -> Result<ParsedInfoField, Box<dyn std::error::Error>> {
     if info.is_empty() {
-        return Ok(vec![HashMap::new()]);
+        return Ok((vec![HashMap::new()], AnnotationFieldType::None));
     }
 
     let annotation_result =
         parse_annotation_fields(info, csq_field_names, ann_field_names, transcript_handling)?;
 
+    let field_type = annotation_result.field_type;
     let remaining_info_map = parse_remaining_info_fields(&annotation_result.remaining_info)?;
-    let combined_records =
-        combine_annotation_with_info(annotation_result.records, remaining_info_map.clone());
 
-    if combined_records.is_empty() {
-        Ok(vec![remaining_info_map])
+    if annotation_result.records.is_empty() {
+        Ok((vec![remaining_info_map], field_type))
     } else {
-        Ok(combined_records)
+        let combined_records =
+            combine_annotation_with_info(annotation_result.records, remaining_info_map);
+        Ok((combined_records, field_type))
     }
 }
 
@@ -237,12 +281,18 @@ fn parse_annotation_fields(
     if let Some(csq_value) = extract_csq_regex(&mut parsed_lines) {
         if let Some(field_names) = csq_field_names {
             if !field_names.is_empty() && !csq_value.trim().is_empty() {
-                match parse_csq_field_with_handling(&csq_value, field_names, transcript_handling) {
+                match parse_annotation_field_with_handling(
+                    "CSQ",
+                    &csq_value,
+                    field_names,
+                    transcript_handling,
+                    find_most_severe_consequence,
+                ) {
                     Ok(records) if !records.is_empty() => {
                         return Ok(AnnotationParseResult {
                             field_type: AnnotationFieldType::Csq,
                             records,
-                            remaining_info: parsed_lines[7].clone(),
+                            remaining_info: std::mem::take(&mut parsed_lines[7]),
                         });
                     }
                     Ok(_) => {}
@@ -259,12 +309,18 @@ fn parse_annotation_fields(
     if let Some(ann_value) = extract_ann_regex(&mut parsed_lines) {
         if let Some(field_names) = ann_field_names {
             if !field_names.is_empty() && !ann_value.trim().is_empty() {
-                match parse_ann_field_with_handling(&ann_value, field_names, transcript_handling) {
+                match parse_annotation_field_with_handling(
+                    "ANN",
+                    &ann_value,
+                    field_names,
+                    transcript_handling,
+                    find_most_severe_ann_consequence,
+                ) {
                     Ok(records) if !records.is_empty() => {
                         return Ok(AnnotationParseResult {
                             field_type: AnnotationFieldType::Ann,
                             records,
-                            remaining_info: parsed_lines[7].clone(),
+                            remaining_info: std::mem::take(&mut parsed_lines[7]),
                         });
                     }
                     Ok(_) => {}
@@ -301,20 +357,25 @@ fn create_dummy_vcf_line(info: &str) -> Vec<String> {
     ]
 }
 
-// FIXED: Remove the duplicate function and keep only this safer version
-fn parse_csq_field_with_handling(
-    csq_value: &str,
-    csq_field_names: &[String],
+/// Split a CSQ/ANN value into individual `|`-delimited transcript annotations
+/// and reduce them to output records according to `transcript_handling`.
+/// `find_most_severe` implements the annotation-type-specific severity ranking
+/// (VEP orders by a fixed consequence-term list; SnpEff ranks by IMPACT).
+fn parse_annotation_field_with_handling(
+    prefix: &str,
+    value: &str,
+    field_names: &[String],
     transcript_handling: TranscriptHandling,
+    find_most_severe: impl Fn(
+        &[&str],
+        &[String],
+    ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>>,
 ) -> Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
-    if csq_value.trim().is_empty() {
+    if value.trim().is_empty() {
         return Ok(Vec::new());
     }
 
-    let annotations: Vec<&str> = csq_value
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .collect();
+    let annotations: Vec<&str> = value.split(',').filter(|s| !s.trim().is_empty()).collect();
 
     if annotations.is_empty() {
         return Ok(Vec::new());
@@ -325,20 +386,22 @@ fn parse_csq_field_with_handling(
             let first_annotation = annotations
                 .first()
                 .ok_or("No annotations found after filtering")?;
-            let parsed = parse_single_csq_annotation(first_annotation, csq_field_names)?;
+            let parsed = parse_single_annotation(prefix, first_annotation, field_names)?;
             Ok(vec![parsed])
         }
         TranscriptHandling::MostSevere => {
-            let most_severe = find_most_severe_consequence(&annotations, csq_field_names)?;
+            let most_severe = find_most_severe(&annotations, field_names)?;
             Ok(vec![most_severe])
         }
         TranscriptHandling::SplitRows => {
             let mut all_annotations = Vec::new();
             for annotation in annotations {
-                match parse_single_csq_annotation(annotation, csq_field_names) {
+                match parse_single_annotation(prefix, annotation, field_names) {
                     Ok(parsed) => all_annotations.push(parsed),
                     Err(e) => {
-                        eprintln!("Warning: Failed to parse CSQ annotation '{annotation}': {e}");
+                        eprintln!(
+                            "Warning: Failed to parse {prefix} annotation '{annotation}': {e}"
+                        );
                     }
                 }
             }
@@ -347,107 +410,34 @@ fn parse_csq_field_with_handling(
     }
 }
 
-fn parse_ann_field_with_handling(
-    ann_value: &str,
-    ann_field_names: &[String],
-    transcript_handling: TranscriptHandling,
-) -> Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>> {
-    if ann_value.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let annotations: Vec<&str> = ann_value
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-
-    if annotations.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    match transcript_handling {
-        TranscriptHandling::FirstOnly => {
-            let first_annotation = annotations
-                .first()
-                .ok_or("No annotations found after filtering")?;
-            let parsed = parse_single_ann_annotation(first_annotation, ann_field_names)?;
-            Ok(vec![parsed])
-        }
-        TranscriptHandling::MostSevere => {
-            let most_severe = find_most_severe_ann_consequence(&annotations, ann_field_names)?;
-            Ok(vec![most_severe])
-        }
-        TranscriptHandling::SplitRows => {
-            let mut all_annotations = Vec::new();
-            for annotation in annotations {
-                match parse_single_ann_annotation(annotation, ann_field_names) {
-                    Ok(parsed) => all_annotations.push(parsed),
-                    Err(e) => {
-                        eprintln!("Warning: Failed to parse ANN annotation '{annotation}': {e}");
-                    }
-                }
-            }
-            Ok(all_annotations)
-        }
-    }
-}
-
-fn parse_single_csq_annotation(
+/// Parse a single `|`-delimited CSQ/ANN annotation into a `{prefix}_{field}`
+/// map, e.g. `CSQ_Consequence` or `ANN_Gene_Name`. Values beyond the known
+/// field names are kept under `{prefix}_EXTRA_N`.
+fn parse_single_annotation(
+    prefix: &str,
     annotation: &str,
-    csq_field_names: &[String],
+    field_names: &[String],
 ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
     if annotation.trim().is_empty() {
-        return Err("Empty CSQ annotation".into());
+        return Err(format!("Empty {prefix} annotation").into());
     }
 
     let values: Vec<&str> = annotation.split('|').collect();
     let mut annotation_map = HashMap::new();
 
-    for (i, field_name) in csq_field_names.iter().enumerate() {
+    for (i, field_name) in field_names.iter().enumerate() {
         let value = values.get(i).unwrap_or(&"").trim();
         let formatted_value = if value.is_empty() { "." } else { value };
         annotation_map.insert(
-            format!("CSQ_{}", sanitize_field_name(field_name)),
+            format!("{prefix}_{}", sanitize_field_name(field_name)),
             formatted_value.to_string(),
         );
     }
 
-    if values.len() > csq_field_names.len() {
-        for (i, value) in values.iter().enumerate().skip(csq_field_names.len()) {
+    if values.len() > field_names.len() {
+        for (i, value) in values.iter().enumerate().skip(field_names.len()) {
             annotation_map.insert(
-                format!("CSQ_EXTRA_{}", i - csq_field_names.len() + 1),
-                value.trim().to_string(),
-            );
-        }
-    }
-
-    Ok(annotation_map)
-}
-
-fn parse_single_ann_annotation(
-    annotation: &str,
-    ann_field_names: &[String],
-) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-    if annotation.trim().is_empty() {
-        return Err("Empty ANN annotation".into());
-    }
-
-    let values: Vec<&str> = annotation.split('|').collect();
-    let mut annotation_map = HashMap::new();
-
-    for (i, field_name) in ann_field_names.iter().enumerate() {
-        let value = values.get(i).unwrap_or(&"").trim();
-        let formatted_value = if value.is_empty() { "." } else { value };
-        annotation_map.insert(
-            format!("ANN_{}", sanitize_field_name(field_name)),
-            formatted_value.to_string(),
-        );
-    }
-
-    if values.len() > ann_field_names.len() {
-        for (i, value) in values.iter().enumerate().skip(ann_field_names.len()) {
-            annotation_map.insert(
-                format!("ANN_EXTRA_{}", i - ann_field_names.len() + 1),
+                format!("{prefix}_EXTRA_{}", i - field_names.len() + 1),
                 value.trim().to_string(),
             );
         }
@@ -487,7 +477,7 @@ fn find_most_severe_ann_consequence(
     }
 
     let selected_annotation = most_severe.unwrap_or(annotations[0]);
-    parse_single_ann_annotation(selected_annotation, ann_field_names)
+    parse_single_annotation("ANN", selected_annotation, ann_field_names)
 }
 
 /// Convert SnpEff impact level to numeric severity score
@@ -598,6 +588,11 @@ pub fn sanitize_field_name(field_name: &str) -> String {
         .to_string()
 }
 
+/// Pick the one CSQ annotation vcf2maf would report, porting `vcf2maf.pl:871-894`:
+/// sort by transcript biotype, then consequence severity, then longest transcript; then
+/// take the worst-affected *gene* and that gene's canonical isoform. Biotype outranks
+/// severity, so a milder consequence on a protein_coding transcript beats a worse one on
+/// an lncRNA — and the canonical isoform wins even when a sibling isoform is more severe.
 fn find_most_severe_consequence(
     annotations: &[&str],
     csq_field_names: &[String],
@@ -606,70 +601,68 @@ fn find_most_severe_consequence(
         return Err("No annotations provided".into());
     }
 
-    let severity_order = vec![
-        "transcript_ablation",
-        "splice_acceptor_variant",
-        "splice_donor_variant",
-        "stop_gained",
-        "frameshift_variant",
-        "stop_lost",
-        "start_lost",
-        "transcript_amplification",
-        "inframe_insertion",
-        "inframe_deletion",
-        "missense_variant",
-        "protein_altering_variant",
-        "splice_region_variant",
-        "incomplete_terminal_codon_variant",
-        "start_retained_variant",
-        "stop_retained_variant",
-        "synonymous_variant",
-        "coding_sequence_variant",
-        "mature_miRNA_variant",
-        "5_prime_UTR_variant",
-        "3_prime_UTR_variant",
-        "non_coding_transcript_exon_variant",
-        "intron_variant",
-        "NMD_transcript_variant",
-        "non_coding_transcript_variant",
-        "upstream_gene_variant",
-        "downstream_gene_variant",
-        "TFBS_ablation",
-        "TFBS_amplification",
-        "TF_binding_site_variant",
-        "regulatory_region_ablation",
-        "regulatory_region_amplification",
-        "feature_elongation",
-        "regulatory_region_variant",
-        "feature_truncation",
-        "intergenic_variant",
-    ];
+    let idx = |name: &str, default: usize| {
+        csq_field_names
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or(default)
+    };
+    let (i_cons, i_symbol, i_biotype, i_canonical, i_cdna) = (
+        idx("Consequence", 1),
+        idx("SYMBOL", 3),
+        idx("BIOTYPE", 7),
+        idx("CANONICAL", 23),
+        idx("cDNA_position", 12),
+    );
 
-    let mut most_severe_annotation = annotations[0];
-    let mut best_severity = usize::MAX;
+    let field = |a: &str, i: usize| a.split('|').nth(i).unwrap_or("").to_string();
 
-    let consequence_index = csq_field_names
+    // vcf2maf.pl:862-863 — Transcript_Length is the denominator of cDNA_position.
+    let transcript_length = |a: &str| -> u64 {
+        field(a, i_cdna)
+            .rsplit_once('/')
+            .and_then(|(_, len)| len.parse().ok())
+            .unwrap_or(0)
+    };
+    let severity = |a: &str| {
+        MafRecord::effect_priority(&MafRecord::resolve_one_consequence(
+            &field(a, i_cons).to_lowercase(),
+        ))
+    };
+
+    // vcf2maf.pl:871-875. Rust's sort_by is stable, as Perl's sort is, so equal-key
+    // annotations keep their input order in both.
+    let mut sorted: Vec<&str> = annotations.to_vec();
+    sorted.sort_by(|a, b| {
+        biotype_priority(&field(a, i_biotype))
+            .cmp(&biotype_priority(&field(b, i_biotype)))
+            .then_with(|| severity(a).cmp(&severity(b)))
+            .then_with(|| transcript_length(b).cmp(&transcript_length(a)))
+    });
+
+    let has_symbol = |a: &str| !field(a, i_symbol).is_empty();
+    let is_canonical = |a: &str| field(a, i_canonical) == "YES";
+
+    // vcf2maf.pl:878-880 — the worst affected GENE, not the worst effect.
+    let maf_gene = sorted
         .iter()
-        .position(|name| name == "Consequence")
-        .unwrap_or(1);
+        .find(|a| has_symbol(a))
+        .map(|a| field(a, i_symbol));
 
-    for annotation in annotations {
-        let values: Vec<&str> = annotation.split('|').collect();
-        if let Some(consequence) = values.get(consequence_index) {
-            let consequences: Vec<&str> = consequence.split('&').collect();
+    // vcf2maf.pl:888, then :891, then :893. The two --custom-enst branches (:883, :886)
+    // have no equivalent here — this tool exposes no isoform override.
+    let selected = maf_gene
+        .as_ref()
+        .and_then(|gene| {
+            sorted
+                .iter()
+                .find(|a| &field(a, i_symbol) == gene && is_canonical(a))
+        })
+        .or_else(|| sorted.iter().find(|a| has_symbol(a) && is_canonical(a)))
+        .copied()
+        .unwrap_or(sorted[0]);
 
-            for cons in consequences {
-                if let Some(severity) = severity_order.iter().position(|&x| x == cons) {
-                    if severity < best_severity {
-                        best_severity = severity;
-                        most_severe_annotation = annotation;
-                    }
-                }
-            }
-        }
-    }
-
-    parse_single_csq_annotation(most_severe_annotation, csq_field_names)
+    parse_single_annotation("CSQ", selected, csq_field_names)
 }
 /// Reformat VCF data with header information for annotation field extraction
 ///
@@ -723,29 +716,126 @@ pub fn reformat_vcf_data_with_header(
         }
     }
 
-    let headers = generate_headers_from_records(&all_records, &column_names_vec);
+    let headers = generate_headers_from_records(&all_records, &column_names_vec, header);
 
     Ok((headers, all_records))
 }
 
-/// Generate column headers from the first reformatted record
+/// The `##INFO=<ID=…` / `##FORMAT=<ID=…` ids a VCF header declares, in declaration order.
+fn declared_ids(vcf_header: &str, kind: &str) -> Vec<String> {
+    let needle = format!("##{kind}=<ID=");
+    vcf_header
+        .lines()
+        .filter_map(|line| line.strip_prefix(needle.as_str()))
+        .map(|rest| {
+            rest.split([',', '>'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+/// Generate column headers from the first reformatted record, plus every INFO and FORMAT field
+/// the VCF header declares that this record happens not to carry.
+///
+/// Deriving the column list from record #1 alone silently drops any key absent from it — measured
+/// on real files: 73% of rows losing `LOF`/`NMD` (SnpEff), 27% losing `PON`/`STR`/`RU` and 34%
+/// losing the `PGT`/`PID`/`PS` phasing trio (Mutect2). Rows are rendered by header name, so the
+/// cost of a declared-but-unused field is one column of `.`, never a shifted row.
+///
+/// CSQ/ANN sub-fields are positional and therefore always complete on every record, so only INFO
+/// and FORMAT need the header pass.
+/// The column list a VCF declares before any variant is seen: the fixed columns, then
+/// the CSQ/ANN sub-fields named in the annotation's own `Format:` string. The INFO and
+/// sample blocks are added by the caller, which already reads them from the header.
+fn headers_from_declarations_only(vcf_header: &str) -> Vec<String> {
+    let mut headers: Vec<String> = FIXED_COLUMNS.iter().map(|c| c.to_string()).collect();
+    // Gated on the declaration, because extract_ann_format_from_header falls back to a
+    // default SnpEff layout: without this, an unannotated VCF grows 16 phantom columns.
+    let declared = declared_ids(vcf_header, "INFO");
+    for (prefix, names) in [
+        ("CSQ", extract_csq_format_from_header(vcf_header)),
+        ("ANN", extract_ann_format_from_header(vcf_header)),
+    ] {
+        if !declared.iter().any(|id| id == prefix) {
+            continue;
+        }
+        for name in names.unwrap_or_default() {
+            headers.push(format!("{prefix}_{}", sanitize_field_name(&name)));
+        }
+    }
+    headers
+}
+
 fn generate_headers_from_records(
     records: &[ReformattedVcfRecord],
     column_names_vec: &[&str],
+    vcf_header: &str,
 ) -> Vec<String> {
-    if let Some(first_record) = records.first() {
-        let sample_names: Vec<String> = if column_names_vec.len() > 9 {
-            column_names_vec[9..]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            vec![]
-        };
-        generate_headers_from_record(first_record, &sample_names)
+    let sample_names: Vec<String> = if column_names_vec.len() > 9 {
+        column_names_vec[9..]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         vec![]
+    };
+
+    // With no records, every column still comes from the VCF header's own declarations,
+    // so a variant-free VCF gets a column header rather than a zero-byte file.
+    let base = match records.first() {
+        Some(first_record) => generate_headers_from_record(first_record, &sample_names),
+        None => headers_from_declarations_only(vcf_header),
+    };
+    let (fixed, rest) = base.split_at(FIXED_COLUMNS.len());
+
+    // INFO block: the union, still alphabetical, so existing columns keep their position.
+    let mut info: Vec<String> = declared_ids(vcf_header, "INFO")
+        .into_iter()
+        .filter(|id| id != "CSQ" && id != "ANN")
+        .map(|id| format!("INFO_{}", sanitize_field_name(&id)))
+        .collect();
+    info.extend(rest.iter().filter(|h| h.starts_with("INFO_")).cloned());
+    info.sort();
+    info.dedup();
+
+    let annotation: Vec<String> = rest
+        .iter()
+        .filter(|h| h.starts_with("CSQ_") || h.starts_with("ANN_"))
+        .cloned()
+        .collect();
+
+    // Sample block: this record's FORMAT keys first, then the declared ones it lacks.
+    let declared_format = declared_ids(vcf_header, "FORMAT");
+    let sample_block: Vec<&String> = rest
+        .iter()
+        .filter(|h| !h.starts_with("INFO_") && !h.starts_with("CSQ_") && !h.starts_with("ANN_"))
+        .collect();
+    let mut samples = Vec::new();
+    for name in &sample_names {
+        let prefix = format!("{name}_");
+        let existing: Vec<String> = sample_block
+            .iter()
+            .filter(|h| h.starts_with(&prefix))
+            .map(|h| (*h).clone())
+            .collect();
+        samples.extend(existing.iter().cloned());
+        for key in &declared_format {
+            let column = format!("{prefix}{key}");
+            if !existing.contains(&column) {
+                samples.push(column);
+            }
+        }
     }
+
+    let mut headers = fixed.to_vec();
+    headers.extend(info);
+    headers.extend(annotation);
+    headers.extend(samples);
+    headers
 }
 /// Parallel version of VCF data reformatting for improved performance on large files
 ///
@@ -810,25 +900,19 @@ pub fn reformat_vcf_data_with_header_parallel(
         flattened_records.append(&mut records);
     }
 
-    let headers = generate_headers_from_records(&flattened_records, &column_names_vec);
+    let headers = generate_headers_from_records(&flattened_records, &column_names_vec, header);
 
     Ok((headers, flattened_records))
 }
 
 // FIXED: Update to handle both CSQ and ANN headers
+const FIXED_COLUMNS: [&str; 7] = ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER"];
+
 fn generate_headers_from_record(
     record: &ReformattedVcfRecord,
     _sample_names: &[String],
 ) -> Vec<String> {
-    let mut headers = vec![
-        "CHROM".to_string(),
-        "POS".to_string(),
-        "ID".to_string(),
-        "REF".to_string(),
-        "ALT".to_string(),
-        "QUAL".to_string(),
-        "FILTER".to_string(),
-    ];
+    let mut headers: Vec<String> = FIXED_COLUMNS.iter().map(|c| c.to_string()).collect();
 
     let mut info_keys: Vec<String> = record
         .info_fields
@@ -874,6 +958,8 @@ fn generate_headers_from_record(
 /// * `headers` - Column headers for the output
 /// * `records` - Reformatted VCF records to write
 /// * `compress` - Whether to compress output with gzip
+// Superseded by the streaming path; kept because tests/test.rs still exercises it.
+#[allow(dead_code)]
 pub fn write_reformatted_vcf(
     filename: &str,
     headers: &[String],
@@ -906,43 +992,61 @@ fn write_tsv_content<W: Write>(
     headers: &[String],
     records: &[ReformattedVcfRecord],
 ) -> std::io::Result<()> {
-    writeln!(writer, "{}", headers.join("\t"))?;
+    write_tsv_header(writer, headers)?;
+    write_tsv_rows(writer, headers, records)
+}
+
+/// The column line. Streaming writers call this once, before the first batch.
+pub fn write_tsv_header<W: Write>(writer: &mut W, headers: &[String]) -> std::io::Result<()> {
+    writeln!(writer, "{}", headers.join("\t"))
+}
+
+/// Rows only, no column line — so a caller can write one batch at a time and never hold the
+/// whole file. This is the single rendering both the buffered and the streaming path use.
+pub fn write_tsv_rows<W: Write>(
+    writer: &mut W,
+    headers: &[String],
+    records: &[ReformattedVcfRecord],
+) -> std::io::Result<()> {
+    let dot = ".";
 
     for record in records {
-        let mut row = Vec::new();
+        let mut row: Vec<Cow<str>> = Vec::with_capacity(headers.len());
 
         for header in headers {
-            let value = match header.as_str() {
-                "CHROM" => record.chromosome.clone(),
-                "POS" => record.position.to_string(),
-                "ID" => record.id.as_ref().unwrap_or(&".".to_string()).clone(),
-                "REF" => record.reference.clone(),
-                "ALT" => record.alternate.clone(),
-                "QUAL" => record
-                    .quality
-                    .map(|q| q.to_string())
-                    .unwrap_or(".".to_string()),
-                "FILTER" => record.filter.clone(),
+            let value: Cow<str> = match header.as_str() {
+                "CHROM" => Cow::Borrowed(record.chromosome.as_str()),
+                "POS" => Cow::Owned(record.position.to_string()),
+                "ID" => Cow::Borrowed(record.id.as_deref().unwrap_or(dot)),
+                "REF" => Cow::Borrowed(record.reference.as_str()),
+                "ALT" => Cow::Borrowed(record.alternate.as_str()),
+                "QUAL" => match record.quality {
+                    Some(q) => Cow::Owned(q.to_string()),
+                    None => Cow::Borrowed(dot),
+                },
+                "FILTER" => Cow::Borrowed(record.filter.as_str()),
                 _ => {
                     if header.starts_with("INFO_")
                         || header.starts_with("CSQ_")
                         || header.starts_with("ANN_")
                     {
-                        record
-                            .info_fields
-                            .get(header)
-                            .unwrap_or(&".".to_string())
-                            .clone()
+                        match record.info_fields.get(header) {
+                            Some(v) => Cow::Borrowed(v.as_str()),
+                            None => Cow::Borrowed(dot),
+                        }
                     } else {
                         if let Some(ref sample_data) = record.format_sample_data {
-                            let mut found_value = None;
+                            let mut found_value: Option<&str> = None;
 
                             for sample in &sample_data.samples {
                                 for format_key in &sample_data.format_keys {
                                     let expected_header =
                                         format!("{}_{}", sample.sample_name, format_key);
                                     if expected_header == *header {
-                                        found_value = sample.format_fields.get(format_key).cloned();
+                                        found_value = sample
+                                            .format_fields
+                                            .get(format_key)
+                                            .map(|s| s.as_str());
                                         break;
                                     }
                                 }
@@ -951,9 +1055,9 @@ fn write_tsv_content<W: Write>(
                                 }
                             }
 
-                            found_value.unwrap_or(".".to_string())
+                            Cow::Borrowed(found_value.unwrap_or(dot))
                         } else {
-                            ".".to_string()
+                            Cow::Borrowed(dot)
                         }
                     }
                 }
@@ -966,29 +1070,8 @@ fn write_tsv_content<W: Write>(
 
     Ok(())
 }
-/// Simplified VCF reformatting function with default settings
-///
-/// This convenience function reformats VCF data using default settings:
-/// - No header parsing (empty header)
-/// - First transcript only
-///
-/// Use `reformat_vcf_data_with_header` for more control over the processing.
-///
-/// # Arguments
-///
-/// * `column_names` - Column header line from VCF
-/// * `data_lines` - VCF data lines to process
-///
-/// # Returns
-///
-/// A tuple of (headers, reformatted_records)
-pub fn _reformat_vcf_data(
-    column_names: &str,
-    data_lines: &[String],
-) -> std::result::Result<(Vec<String>, Vec<ReformattedVcfRecord>), Box<dyn std::error::Error>> {
-    reformat_vcf_data_with_header("", column_names, data_lines, TranscriptHandling::FirstOnly)
-}
-
+// Kept for the library API — `tests/test.rs` exercises it. The binary now streams instead.
+#[allow(dead_code)]
 pub fn write_maf_file(
     filename: &str,
     records: &[MafRecord],
@@ -1006,7 +1089,51 @@ pub fn write_maf_file(
     Ok(())
 }
 
+/// A MAF file being written a batch at a time, so the caller never has to hold every record.
+/// The header goes out on `create`; `finish` is required for the gzip trailer.
+pub enum MafWriter {
+    Plain(std::io::BufWriter<std::fs::File>),
+    Gz(Box<GzEncoder<std::io::BufWriter<std::fs::File>>>),
+}
+
+impl MafWriter {
+    pub fn create(filename: &str, compress: bool) -> std::io::Result<Self> {
+        let file = std::io::BufWriter::new(std::fs::File::create(filename)?);
+        let mut writer = if compress {
+            MafWriter::Gz(Box::new(GzEncoder::new(file, Compression::default())))
+        } else {
+            MafWriter::Plain(file)
+        };
+        let headers = MafRecord::get_maf_headers();
+        writeln!(writer.inner(), "{}", headers.join("\t"))?;
+        Ok(writer)
+    }
+
+    fn inner(&mut self) -> &mut dyn Write {
+        match self {
+            MafWriter::Plain(w) => w,
+            MafWriter::Gz(w) => w.as_mut(),
+        }
+    }
+
+    pub fn write_rows(&mut self, records: &[MafRecord]) -> std::io::Result<()> {
+        let writer = self.inner();
+        for record in records {
+            writeln!(writer, "{}", record.to_tsv_line())?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> std::io::Result<()> {
+        match self {
+            MafWriter::Plain(mut w) => w.flush(),
+            MafWriter::Gz(w) => w.finish().map(|mut f| f.flush()).and_then(|r| r),
+        }
+    }
+}
+
 // Helper function to write MAF content
+#[allow(dead_code)]
 fn write_maf_content<W: Write>(writer: &mut W, records: &[MafRecord]) -> std::io::Result<()> {
     // Write MAF header
     let headers = MafRecord::get_maf_headers();
@@ -1021,6 +1148,8 @@ fn write_maf_content<W: Write>(writer: &mut W, records: &[MafRecord]) -> std::io
 }
 
 /// Process VCF data in chunks to avoid memory exhaustion on large files
+// Superseded by the streaming path; kept because tests/test.rs still exercises it.
+#[allow(dead_code)]
 pub fn reformat_vcf_data_with_header_parallel_chunked(
     header: &str,
     column_names: &str,
@@ -1082,7 +1211,8 @@ pub fn reformat_vcf_data_with_header_parallel_chunked(
 
         // Generate headers from first non-empty chunk only
         if !headers_generated && !chunk_records.is_empty() {
-            output_headers = generate_headers_from_records(&chunk_records, &column_names_vec);
+            output_headers =
+                generate_headers_from_records(&chunk_records, &column_names_vec, header);
 
             // Write headers to output
             writeln!(output_writer, "{}", output_headers.join("\t"))?;
@@ -1100,7 +1230,7 @@ pub fn reformat_vcf_data_with_header_parallel_chunked(
         total_processed += chunk.len();
 
         // Progress logging every 100k lines
-        if total_processed % 100_000 == 0 {
+        if total_processed.is_multiple_of(100_000) {
             println!("   📊 Streamed {} lines so far...", total_processed);
         }
     }
@@ -1113,48 +1243,228 @@ pub fn reformat_vcf_data_with_header_parallel_chunked(
 }
 
 /// Extract values from a record in the same order as headers
-fn extract_values_from_record(record: &ReformattedVcfRecord, headers: &[String]) -> Vec<String> {
+fn extract_values_from_record<'a>(
+    record: &'a ReformattedVcfRecord,
+    headers: &[String],
+) -> Vec<Cow<'a, str>> {
+    let dot = ".";
     headers
         .iter()
-        .map(|header| {
-            match header.as_str() {
-                "CHROM" => record.chromosome.clone(),
-                "POS" => record.position.to_string(),
-                "ID" => record.id.as_deref().unwrap_or(".").to_string(),
-                "REF" => record.reference.clone(),
-                "ALT" => record.alternate.clone(),
-                "QUAL" => record.quality.map_or(".".to_string(), |q| q.to_string()),
-                "FILTER" => record.filter.clone(),
-                _ => {
-                    // Handle INFO fields, CSQ fields, ANN fields, and sample data
-                    if let Some(value) = record.info_fields.get(header) {
-                        value.clone()
-                    } else if let Some(sample_data) = &record.format_sample_data {
-                        // Get sample value for this header
-                        extract_sample_value_for_header(sample_data, header)
-                    } else {
-                        ".".to_string()
-                    }
+        .map(|header| match header.as_str() {
+            "CHROM" => Cow::Borrowed(record.chromosome.as_str()),
+            "POS" => Cow::Owned(record.position.to_string()),
+            "ID" => Cow::Borrowed(record.id.as_deref().unwrap_or(dot)),
+            "REF" => Cow::Borrowed(record.reference.as_str()),
+            "ALT" => Cow::Borrowed(record.alternate.as_str()),
+            "QUAL" => match record.quality {
+                Some(q) => Cow::Owned(q.to_string()),
+                None => Cow::Borrowed(dot),
+            },
+            "FILTER" => Cow::Borrowed(record.filter.as_str()),
+            _ => {
+                if let Some(value) = record.info_fields.get(header) {
+                    Cow::Borrowed(value.as_str())
+                } else if let Some(sample_data) = &record.format_sample_data {
+                    extract_sample_value_for_header_cow(sample_data, header)
+                } else {
+                    Cow::Borrowed(dot)
                 }
             }
         })
         .collect()
 }
 
-/// Helper function to extract sample values by header name
-fn extract_sample_value_for_header(sample_data: &ParsedFormatSample, header: &str) -> String {
-    // Header format: "SAMPLE_NAME_FORMAT_KEY"
+/// Helper function to extract sample values by header name, returning Cow to avoid cloning
+fn extract_sample_value_for_header_cow<'a>(
+    sample_data: &'a ParsedFormatSample,
+    header: &str,
+) -> Cow<'a, str> {
     for sample in &sample_data.samples {
         for format_key in &sample_data.format_keys {
             let expected_header = format!("{}_{}", sample.sample_name, format_key);
             if expected_header == header {
-                return sample
-                    .format_fields
-                    .get(format_key)
-                    .cloned()
-                    .unwrap_or_else(|| ".".to_string());
+                return match sample.format_fields.get(format_key) {
+                    Some(v) => Cow::Borrowed(v.as_str()),
+                    None => Cow::Borrowed("."),
+                };
             }
         }
     }
-    ".".to_string()
+    Cow::Borrowed(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A VCF with a header and no variants must still produce a column header, built
+    /// from the declarations alone, or the run writes a zero-byte file no reader opens.
+    #[test]
+    fn test_headers_come_from_declarations_when_there_are_no_records() {
+        let header = concat!(
+            "##fileformat=VCFv4.2\n",
+            "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n",
+            "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|SYMBOL\">\n",
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"gt\">\n",
+        );
+        let columns: Vec<&str> = "CHROM POS ID REF ALT QUAL FILTER INFO FORMAT TUMOR"
+            .split(' ')
+            .collect();
+
+        let headers = generate_headers_from_records(&[], &columns, header);
+        assert_eq!(
+            headers,
+            vec![
+                "CHROM",
+                "POS",
+                "ID",
+                "REF",
+                "ALT",
+                "QUAL",
+                "FILTER",
+                "INFO_DP",
+                "CSQ_Allele",
+                "CSQ_Consequence",
+                "CSQ_SYMBOL",
+                "TUMOR_GT",
+            ]
+        );
+    }
+
+    /// The ANN extractor falls back to a default SnpEff layout when the header declares
+    /// none, so the no-record path must gate on the declaration or invent 16 columns.
+    #[test]
+    fn test_no_records_and_no_annotation_declared_yields_only_fixed_columns() {
+        let header = "##fileformat=VCFv4.2\n";
+        let columns: Vec<&str> = "CHROM POS ID REF ALT QUAL FILTER INFO".split(' ').collect();
+
+        let headers = generate_headers_from_records(&[], &columns, header);
+        assert_eq!(headers, FIXED_COLUMNS.to_vec());
+    }
+
+    fn csq_fields() -> Vec<String> {
+        [
+            "Consequence",
+            "SYMBOL",
+            "BIOTYPE",
+            "CANONICAL",
+            "cDNA_position",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    #[test]
+    fn most_severe_ranks_terms_the_old_36_term_list_never_had() {
+        // splice_donor_5th_base_variant is in EFFECT_PRIORITY but was absent from the
+        // hand-written list this function used to carry, so an annotation holding only it
+        // scored nothing and could never be selected.
+        let annotations = vec![
+            "intron_variant|GENEA|protein_coding|YES|100/1000",
+            "splice_donor_5th_base_variant|GENEB|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("GENEB"));
+    }
+
+    #[test]
+    fn consequence_terms_are_ranked_case_insensitively() {
+        // VEP writes NMD_transcript_variant and TFBS_ablation with capitals; the ported
+        // table is lowercase, so an unlowered lookup would score them as unknown.
+        let annotations = vec![
+            "NMD_transcript_variant|GENEA|protein_coding|YES|100/1000",
+            "downstream_gene_variant|GENEB|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("GENEA"));
+    }
+
+    #[test]
+    fn biotype_outranks_severity_when_choosing_a_transcript() {
+        // vcf2maf.pl:871-875 sorts on biotype BEFORE effect. A more severe consequence on a
+        // lncRNA loses to a milder one on a protein_coding transcript.
+        let annotations = vec![
+            "non_coding_transcript_exon_variant|LAMTOR5-AS1|lncRNA|YES|100/1000",
+            "intron_variant|LAMTOR5|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(
+            picked.get("CSQ_SYMBOL").map(String::as_str),
+            Some("LAMTOR5")
+        );
+    }
+
+    #[test]
+    fn canonical_isoform_of_the_worst_gene_wins_over_a_worse_noncanonical_one() {
+        // vcf2maf.pl:878-891: pick the worst affected GENE first, then that gene's
+        // CANONICAL=YES isoform — even though the non-canonical isoform is more severe.
+        let annotations = vec![
+            "stop_gained|GENEA|protein_coding||100/1000",
+            "missense_variant|GENEA|protein_coding|YES|200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(
+            picked.get("CSQ_Consequence").map(String::as_str),
+            Some("missense_variant")
+        );
+    }
+
+    #[test]
+    fn longest_transcript_breaks_a_biotype_and_severity_tie() {
+        // Third sort key, vcf2maf.pl:874 — Transcript_Length is the cDNA_position
+        // denominator (vcf2maf.pl:862-863), descending.
+        let annotations = vec![
+            "missense_variant|GENEA|protein_coding|YES|10/500",
+            "missense_variant|GENEB|protein_coding|YES|10/5000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(picked.get("CSQ_SYMBOL").map(String::as_str), Some("GENEB"));
+    }
+
+    #[test]
+    fn falls_back_to_the_worst_effect_when_no_annotation_has_a_symbol() {
+        // vcf2maf.pl:893 — $all_effects[0] after the sort, when nothing has a SYMBOL.
+        let annotations = vec![
+            "intron_variant||lncRNA||100/1000",
+            "stop_gained||protein_coding||200/2000",
+        ];
+        let picked = find_most_severe_consequence(&annotations, &csq_fields()).unwrap();
+        assert_eq!(
+            picked.get("CSQ_Consequence").map(String::as_str),
+            Some("stop_gained")
+        );
+    }
+
+    #[test]
+    fn headers_cover_fields_the_first_record_lacks() {
+        // Record 1 carries DP and GT only; the header also declares LOF, PGT and an unused SB.
+        let header = "##fileformat=VCFv4.2\n##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n##INFO=<ID=LOF,Number=.,Type=String,Description=\"Loss of function\">\n##INFO=<ID=SB,Number=1,Type=Integer,Description=\"Never used\">\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n##FORMAT=<ID=PGT,Number=1,Type=String,Description=\"Phasing\">\n";
+        let column_names = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1";
+        let lines = vec![
+            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=30\tGT\t0/1".to_string(),
+            "chr1\t200\t.\tC\tT\t60\tPASS\tDP=40;LOF=(X|X|1|1.00)\tGT:PGT\t0/1:0|1".to_string(),
+        ];
+
+        let (headers, _records) = reformat_vcf_data_with_header(
+            header,
+            column_names,
+            &lines,
+            TranscriptHandling::FirstOnly,
+        )
+        .unwrap();
+
+        // Present on record 2 only — dropped entirely before the header pass.
+        assert!(headers.contains(&"INFO_LOF".to_string()));
+        assert!(headers.contains(&"S1_PGT".to_string()));
+        // Declared but never used: one empty column is the price, not a missing one.
+        assert!(headers.contains(&"INFO_SB".to_string()));
+        // Nothing lost, nothing duplicated.
+        assert!(headers.contains(&"INFO_DP".to_string()));
+        assert!(headers.contains(&"S1_GT".to_string()));
+        let mut sorted = headers.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), headers.len(), "duplicate column names");
+    }
 }

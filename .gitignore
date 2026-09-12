@@ -9,3 +9,8 @@ vcf-reformatter
 *.maf
 *.sh
 *.txt
+# validation scripts are part of the test suite
+!tests/scripts/*.sh
+tests/scripts/._*
+tests/scripts/results/
+reports/

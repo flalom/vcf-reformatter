@@ -1,7 +1,8 @@
 [package]
 name = "vcf-reformatter"
-version = "0.3.0"
+version = "0.7.5"
 edition = "2021"
+rust-version = "1.87"
 description = "Fast VCF file parser and reformatter with VEP and SnpEff annotation support which can output to MAF"
 authors = ["Flavio Lombardo <fl@flaviolombardo.site>"]
 license = "MIT"
@@ -11,12 +12,15 @@ keywords = ["vcf", "bioinformatics", "vep", "snpeff", "maf"]
 categories = ["science", "command-line-utilities"]
 readme = "README.md"
 include = [
-    "tests/*",
-    "src/*",
+    "src/[a-z]*.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE",
 ]
+
+[features]
+default = ["parquet_out"]
+parquet_out = ["dep:arrow", "dep:parquet"]
 
 [dependencies]
 flate2 = "1.1.2"
@@ -24,4 +28,10 @@ regex = "1.11.1"
 rayon = "1.10.0"
 num_cpus = "1.17.0"
 clap = { version = "4.0", features = ["derive"] }
+indexmap = "2.7"
+chrono = "0.4"
+arrow = { version = "53", optional = true }
+parquet = { version = "53", optional = true }
+
+[dev-dependencies]
 tempfile = "3.20.0"

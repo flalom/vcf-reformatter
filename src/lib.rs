@@ -3,5 +3,9 @@ pub mod extract_ann_and_ann_names;
 pub mod extract_csq_and_csq_names;
 pub mod extract_sample_info;
 pub mod get_info_from_header;
+pub mod html_report;
+#[cfg(feature = "parquet_out")]
+pub mod parquet_writer;
 pub mod read_vcf_gz;
 pub mod reformat_vcf;
+pub mod summary;

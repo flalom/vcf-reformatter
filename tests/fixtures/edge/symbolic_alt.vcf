@@ -1,0 +1,11 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=248956422>
+##ALT=<ID=DEL,Description="Deletion">
+##ALT=<ID=NON_REF,Description="Represents any possible alternative allele">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	TUMOR
+chr1	1000	.	A	<DEL>	50.0	PASS	DP=30;END=1500	GT	0/1
+chr1	2000	.	C	<NON_REF>	40.0	PASS	DP=25	GT	0/1
+chr1	3000	.	G	A,<NON_REF>	45.0	PASS	DP=28	GT	0/1
