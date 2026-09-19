@@ -62,18 +62,6 @@ impl ParsedFormatSample {
     }
 }
 
-// Alias for backward compatibility with tests
-pub type _SampleData = ParsedSample;
-
-impl ParsedSample {
-    pub fn _new(sample_name: String) -> Self {
-        ParsedSample {
-            sample_name,
-            format_fields: HashMap::new(),
-        }
-    }
-}
-
 pub fn parse_format_and_samples(
     format_field: Option<&str>,
     sample_fields: &[String],
@@ -141,23 +129,17 @@ mod tests {
         let mut parsed = ParsedFormatSample::new();
         parsed.format_keys = vec!["GT".to_string(), "DP".to_string()];
 
-        let mut sample1 = _SampleData::_new("SAMPLE1".to_string());
-        sample1
-            .format_fields
-            .insert("GT".to_string(), "0/1".to_string());
-        sample1
-            .format_fields
-            .insert("DP".to_string(), "20".to_string());
-
-        let mut sample2 = _SampleData::_new("SAMPLE2".to_string());
-        sample2
-            .format_fields
-            .insert("GT".to_string(), "1/1".to_string());
-        sample2
-            .format_fields
-            .insert("DP".to_string(), "30".to_string());
-
-        parsed.samples = vec![sample1, sample2];
+        let sample = |name: &str, gt: &str, dp: &str| ParsedSample {
+            sample_name: name.to_string(),
+            format_fields: HashMap::from([
+                ("GT".to_string(), gt.to_string()),
+                ("DP".to_string(), dp.to_string()),
+            ]),
+        };
+        parsed.samples = vec![
+            sample("SAMPLE1", "0/1", "20"),
+            sample("SAMPLE2", "1/1", "30"),
+        ];
 
         let headers = parsed.get_headers_for_samples();
         assert_eq!(

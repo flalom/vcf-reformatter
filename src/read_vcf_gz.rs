@@ -32,24 +32,6 @@ pub fn open_vcf(file_path: &str) -> Result<VcfStream, Box<dyn std::error::Error>
     split_header(reader)
 }
 
-// Kept for the library API — `tests/test.rs` exercises it. The binary now streams instead.
-#[allow(dead_code)]
-pub fn read_vcf_gz(
-    file_path: &str,
-) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
-    let stream = open_vcf(file_path)?;
-    let data_lines = stream.lines.collect::<io::Result<Vec<String>>>()?;
-
-    println!(
-        "Total lines read: {}",
-        stream.header.matches('\n').count() + 1 + data_lines.len()
-    );
-    println!("Header lines: {}", stream.header.matches('\n').count());
-    println!("Data lines: {}", data_lines.len());
-
-    Ok((stream.header, stream.columns_title, data_lines))
-}
-
 /// Peek the first two bytes of `source` to detect the gzip magic number
 /// (0x1f 0x8b), since a stream like stdin has no filename extension to check.
 /// The peeked bytes are preserved via a `Chain`, so no data is lost.

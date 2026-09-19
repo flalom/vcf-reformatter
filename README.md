@@ -30,14 +30,14 @@ Also incredibly useful for quick checks to your data!
 
 ```` bash
 # Download binary from releases (easiest! You download and use it)
-wget https://github.com/flalom/vcf-reformatter/releases/latest/download/vcf-reformatter-v0.7.5-linux-x86_64
-chmod +x vcf-reformatter-v0.7.5-linux-x86_64
+wget https://github.com/flalom/vcf-reformatter/releases/latest/download/vcf-reformatter-v0.7.6-linux-x86_64
+chmod +x vcf-reformatter-v0.7.6-linux-x86_64
 
 # Transform your VCF file  
-./vcf-reformatter-v0.7.5-linux-x86_64 sample.vcf.gz
+./vcf-reformatter-v0.7.6-linux-x86_64 sample.vcf.gz
 
 # Generate MAF output (validated against vcf2maf for VEP input)
-./vcf-reformatter-v0.7.5-linux-x86_64 sample.vcf.gz --output-format maf
+./vcf-reformatter-v0.7.6-linux-x86_64 sample.vcf.gz --output-format maf
 ````
 OR Via Bioconda
 ```bash
@@ -115,11 +115,11 @@ chr1   69511  A    G    1294.53  65       1        G           missense_variant 
 
 1. **Go to [Releases](https://github.com/flalom/vcf-reformatter/releases/latest)**
 2. **Download the binary for your platform:**
-    - `vcf-reformatter-v0.7.5-linux-x86_64` → **Linux** (most users)
-    - `vcf-reformatter-v0.7.5-linux-x86_64-static` → **HPC clusters** (works everywhere)
-    - `vcf-reformatter-v0.7.5-windows-x86_64.exe` → **Windows**
-    - `vcf-reformatter-v0.7.5-macos-x86_64` → **Intel Mac**
-    - `vcf-reformatter-v0.7.5-macos-arm64` → **Apple Silicon Mac** (all M-series)
+    - `vcf-reformatter-v0.7.6-linux-x86_64` → **Linux** (most users)
+    - `vcf-reformatter-v0.7.6-linux-x86_64-static` → **HPC clusters** (works everywhere)
+    - `vcf-reformatter-v0.7.6-windows-x86_64.exe` → **Windows**
+    - `vcf-reformatter-v0.7.6-macos-x86_64` → **Intel Mac**
+    - `vcf-reformatter-v0.7.6-macos-arm64` → **Apple Silicon Mac** (all M-series)
 
 3. **Make executable and run:**
 ````bash
@@ -221,6 +221,12 @@ vcf-reformatter input.vcf.gz --parquet
 # Same for MAF: writes both the .maf and the .maf.parquet
 vcf-reformatter input.vcf.gz --output-format maf --parquet
 
+# Gzip the text copy, keep the parquet next to it (.tsv.gz + .tsv.parquet)
+vcf-reformatter input.vcf.gz --parquet -c
+
+# Parquet only, no text file at all (big inputs where only the parquet is wanted)
+vcf-reformatter input.vcf.gz --parquet-only
+
 # Parquet is on by default; build without it with
 cargo build --release --no-default-features
 ```
@@ -298,7 +304,9 @@ Options:
                                     none anywhere in the list wins
       --report-dir <DIR>           Directory for the report [default: --output-dir]
       --parquet                    Also write an Apache Parquet copy alongside
-                                   the text output (mutually exclusive with -c)
+                                   the text output (combine with -c to gzip the text)
+      --parquet-only               Write only the Parquet file, no text output
+                                   (implies --parquet, rejects -c)
       --tumor-id <NAME>            Tumor sample name as it appears in #CHROM.
                                    Source of t_depth/t_ref_count/t_alt_count
       --normal-id <NAME>           Matched normal sample name. Populates
@@ -395,8 +403,14 @@ not the same thing.
 
 ```shell script
 tests/scripts/validate_release.sh          # all sections
-tests/scripts/validate_release.sh maf      # MAF parity only
+tests/scripts/validate_release.sh maf      # MAF parity vs vcf2maf only
+tests/scripts/validate_release.sh tsv      # TSV field extraction vs bcftools +split-vep only
 ```
+
+Sections: `maf` (every column against vcf2maf, per file and `-t` mode), `tsv` (the gene,
+consequence, HGVSc and HGVSp columns against `bcftools +split-vep`, both annotators, `first` and
+`split`), `parquet`, `memory`, `stdin`, `reports`, `flags`, `bench`, `edge`. Needs vcf2maf, a
+GRCh38 FASTA and a micromamba env with bcftools; the paths are at the top of the script.
 
 Results land in `tests/scripts/results/summary.{tsv,txt,html}`; the script exits non-zero if any
 check fails.
@@ -445,7 +459,7 @@ vcf-reformatter input.vcf.gz -t split -j 0 -c -v
 - `{prefix}_header.txt`: original VCF header and metadata (TSV mode only)
 - `{prefix}_reformatted.tsv`: flattened tabular data (or `_reformatted.maf` with `--output-format maf`)
 - `{prefix}_summary.html`: processing report, unless `--report txt|none` (`--report html,txt` writes both `_summary.html` and `_summary.txt`)
-- `{prefix}_reformatted.tsv.parquet`: with `--parquet`, written *alongside* the text file, never instead of it
+- `{prefix}_reformatted.tsv.parquet`: with `--parquet`, written *alongside* the text file (gzipped if `-c`); with `--parquet-only`, the text file is not written at all
 
 Reading from stdin (`-`) with no `--prefix` names the outputs `stdin_*`.
 

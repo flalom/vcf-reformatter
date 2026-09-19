@@ -1,6 +1,6 @@
 [package]
 name = "vcf-reformatter"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 rust-version = "1.87"
 description = "Fast VCF file parser and reformatter with VEP and SnpEff annotation support which can output to MAF"

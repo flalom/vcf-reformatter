@@ -23,9 +23,7 @@ use flate2::Compression;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::{create_dir_all, File};
-use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::io::Write;
 
 /// Specifies which type of variant annotation to parse from VCF files
 ///
@@ -50,7 +48,6 @@ pub enum AnnotationFieldType {
 /// Result of parsing annotation fields from a VCF INFO column
 /// This internal structure separates annotation data from other INFO fields
 /// for more efficient processing.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct AnnotationParseResult {
     field_type: AnnotationFieldType,
@@ -947,55 +944,6 @@ fn generate_headers_from_record(
 
     headers
 }
-/// Write reformatted VCF records to a TSV file with optional compression
-///
-/// This function outputs the reformatted data in tab-separated format,
-/// optionally compressing the output with gzip.
-///
-/// # Arguments
-///
-/// * `filename` - Output file path
-/// * `headers` - Column headers for the output
-/// * `records` - Reformatted VCF records to write
-/// * `compress` - Whether to compress output with gzip
-// Superseded by the streaming path; kept because tests/test.rs still exercises it.
-#[allow(dead_code)]
-pub fn write_reformatted_vcf(
-    filename: &str,
-    headers: &[String],
-    records: &[ReformattedVcfRecord],
-    compress: bool,
-) -> std::io::Result<()> {
-    if let Some(parent) = Path::new(filename).parent() {
-        create_dir_all(parent)?;
-    }
-
-    let file = File::create(filename)?;
-
-    if compress {
-        let encoder = GzEncoder::new(file, Compression::default());
-        let mut writer = BufWriter::new(encoder);
-        write_tsv_content(&mut writer, headers, records)?;
-        writer.flush()?;
-    } else {
-        let mut writer = BufWriter::new(file);
-        write_tsv_content(&mut writer, headers, records)?;
-        writer.flush()?;
-    }
-
-    Ok(())
-}
-
-#[allow(clippy::collapsible_else_if)]
-fn write_tsv_content<W: Write>(
-    writer: &mut W,
-    headers: &[String],
-    records: &[ReformattedVcfRecord],
-) -> std::io::Result<()> {
-    write_tsv_header(writer, headers)?;
-    write_tsv_rows(writer, headers, records)
-}
-
 /// The column line. Streaming writers call this once, before the first batch.
 pub fn write_tsv_header<W: Write>(writer: &mut W, headers: &[String]) -> std::io::Result<()> {
     writeln!(writer, "{}", headers.join("\t"))
@@ -1070,30 +1018,13 @@ pub fn write_tsv_rows<W: Write>(
 
     Ok(())
 }
-// Kept for the library API — `tests/test.rs` exercises it. The binary now streams instead.
-#[allow(dead_code)]
-pub fn write_maf_file(
-    filename: &str,
-    records: &[MafRecord],
-    compress: bool,
-) -> std::io::Result<()> {
-    if compress {
-        let file = std::fs::File::create(filename)?;
-        let mut encoder = GzEncoder::new(file, Compression::default());
-        write_maf_content(&mut encoder, records)?;
-        encoder.finish()?;
-    } else {
-        let mut file = std::fs::File::create(filename)?;
-        write_maf_content(&mut file, records)?;
-    }
-    Ok(())
-}
-
 /// A MAF file being written a batch at a time, so the caller never has to hold every record.
 /// The header goes out on `create`; `finish` is required for the gzip trailer.
 pub enum MafWriter {
     Plain(std::io::BufWriter<std::fs::File>),
     Gz(Box<GzEncoder<std::io::BufWriter<std::fs::File>>>),
+    /// Discards everything; used by --parquet-only, where the parquet sink is the only output.
+    Sink(std::io::Sink),
 }
 
 impl MafWriter {
@@ -1109,10 +1040,15 @@ impl MafWriter {
         Ok(writer)
     }
 
+    pub fn sink() -> Self {
+        MafWriter::Sink(std::io::sink())
+    }
+
     fn inner(&mut self) -> &mut dyn Write {
         match self {
             MafWriter::Plain(w) => w,
             MafWriter::Gz(w) => w.as_mut(),
+            MafWriter::Sink(w) => w,
         }
     }
 
@@ -1128,169 +1064,9 @@ impl MafWriter {
         match self {
             MafWriter::Plain(mut w) => w.flush(),
             MafWriter::Gz(w) => w.finish().map(|mut f| f.flush()).and_then(|r| r),
+            MafWriter::Sink(_) => Ok(()),
         }
     }
-}
-
-// Helper function to write MAF content
-#[allow(dead_code)]
-fn write_maf_content<W: Write>(writer: &mut W, records: &[MafRecord]) -> std::io::Result<()> {
-    // Write MAF header
-    let headers = MafRecord::get_maf_headers();
-    writeln!(writer, "{}", headers.join("\t"))?;
-
-    // Write MAF records
-    for record in records {
-        writeln!(writer, "{}", record.to_tsv_line())?;
-    }
-
-    Ok(())
-}
-
-/// Process VCF data in chunks to avoid memory exhaustion on large files
-// Superseded by the streaming path; kept because tests/test.rs still exercises it.
-#[allow(dead_code)]
-pub fn reformat_vcf_data_with_header_parallel_chunked(
-    header: &str,
-    column_names: &str,
-    data_lines: &[String],
-    transcript_handling: TranscriptHandling,
-    output_writer: &mut dyn Write,
-) -> std::result::Result<Vec<String>, Box<dyn std::error::Error>> {
-    let csq_field_names = extract_csq_format_from_header(header);
-    let ann_field_names = extract_ann_format_from_header(header);
-    let column_names_vec: Vec<&str> = column_names.trim_start_matches('#').split('\t').collect();
-
-    // Calculate chunk size
-    let chunk_size = if data_lines.len() > 1_000_000 {
-        50_000
-    } else if data_lines.len() > 100_000 {
-        100_000
-    } else {
-        data_lines.len()
-    };
-
-    let mut headers_generated = false;
-    let mut output_headers: Vec<String> = Vec::new();
-    let mut total_processed = 0usize;
-
-    println!(
-        "🔄 Processing {} lines in chunks of {}",
-        data_lines.len(),
-        chunk_size
-    );
-
-    // Process each chunk and stream output immediately
-    for (chunk_idx, chunk) in data_lines.chunks(chunk_size).enumerate() {
-        // Process chunk in parallel
-        let chunk_results: Vec<Vec<ReformattedVcfRecord>> = chunk
-            .par_iter()
-            .enumerate()
-            .map(|(line_num, line)| {
-                ReformattedVcfRecord::from_vcf_line(
-                    line,
-                    &column_names_vec,
-                    &csq_field_names,
-                    &ann_field_names,
-                    transcript_handling,
-                )
-                .unwrap_or_else(|e| {
-                    let global_line_num = chunk_idx * chunk_size + line_num + 1;
-                    eprintln!(
-                        "Warning: Failed to parse line {}: {} ({})",
-                        global_line_num, e, line
-                    );
-                    Vec::new()
-                })
-            })
-            .collect();
-
-        // Flatten this chunk's results
-        let chunk_records: Vec<ReformattedVcfRecord> =
-            chunk_results.into_iter().flatten().collect();
-
-        // Generate headers from first non-empty chunk only
-        if !headers_generated && !chunk_records.is_empty() {
-            output_headers =
-                generate_headers_from_records(&chunk_records, &column_names_vec, header);
-
-            // Write headers to output
-            writeln!(output_writer, "{}", output_headers.join("\t"))?;
-            headers_generated = true;
-
-            println!("📋 Generated {} column headers", output_headers.len());
-        }
-
-        // Stream each record immediately (NO ACCUMULATION!)
-        for record in chunk_records {
-            let values = extract_values_from_record(&record, &output_headers);
-            writeln!(output_writer, "{}", values.join("\t"))?;
-        }
-
-        total_processed += chunk.len();
-
-        // Progress logging every 100k lines
-        if total_processed.is_multiple_of(100_000) {
-            println!("   📊 Streamed {} lines so far...", total_processed);
-        }
-    }
-
-    println!(
-        "✅ Streaming complete! Processed {} total lines",
-        total_processed
-    );
-    Ok(output_headers)
-}
-
-/// Extract values from a record in the same order as headers
-fn extract_values_from_record<'a>(
-    record: &'a ReformattedVcfRecord,
-    headers: &[String],
-) -> Vec<Cow<'a, str>> {
-    let dot = ".";
-    headers
-        .iter()
-        .map(|header| match header.as_str() {
-            "CHROM" => Cow::Borrowed(record.chromosome.as_str()),
-            "POS" => Cow::Owned(record.position.to_string()),
-            "ID" => Cow::Borrowed(record.id.as_deref().unwrap_or(dot)),
-            "REF" => Cow::Borrowed(record.reference.as_str()),
-            "ALT" => Cow::Borrowed(record.alternate.as_str()),
-            "QUAL" => match record.quality {
-                Some(q) => Cow::Owned(q.to_string()),
-                None => Cow::Borrowed(dot),
-            },
-            "FILTER" => Cow::Borrowed(record.filter.as_str()),
-            _ => {
-                if let Some(value) = record.info_fields.get(header) {
-                    Cow::Borrowed(value.as_str())
-                } else if let Some(sample_data) = &record.format_sample_data {
-                    extract_sample_value_for_header_cow(sample_data, header)
-                } else {
-                    Cow::Borrowed(dot)
-                }
-            }
-        })
-        .collect()
-}
-
-/// Helper function to extract sample values by header name, returning Cow to avoid cloning
-fn extract_sample_value_for_header_cow<'a>(
-    sample_data: &'a ParsedFormatSample,
-    header: &str,
-) -> Cow<'a, str> {
-    for sample in &sample_data.samples {
-        for format_key in &sample_data.format_keys {
-            let expected_header = format!("{}_{}", sample.sample_name, format_key);
-            if expected_header == header {
-                return match sample.format_fields.get(format_key) {
-                    Some(v) => Cow::Borrowed(v.as_str()),
-                    None => Cow::Borrowed("."),
-                };
-            }
-        }
-    }
-    Cow::Borrowed(".")
 }
 
 #[cfg(test)]

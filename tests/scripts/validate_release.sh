@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # validate_release.sh — the release validation matrix. Everything, one file.
-# Usage: tests/scripts/validate_release.sh [all|maf|parquet|memory|stdin|reports|bench|edge]
+# Usage: tests/scripts/validate_release.sh [all|maf|tsv|parquet|memory|stdin|reports|flags|bench|edge]
 #
 # Results land in tests/scripts/results/. Only a FAIL row makes this exit non-zero;
 # INFO rows are documented divergences, recorded rather than hidden.
 set -euo pipefail
 
-SECTIONS=(maf parquet memory stdin reports flags bench edge)
+SECTIONS=(maf tsv parquet memory stdin reports flags bench edge)
 
 want="${1:-all}"
 if [[ "$want" != all ]] && ! printf '%s\n' "${SECTIONS[@]}" | grep -qx -- "$want"; then
@@ -55,18 +55,21 @@ peak_rss() {
     esac
 }
 
-VEP_SMALL="$ROOT/data/B505_V_1/B505_1_V.mutect2.filtered_VEP.ann.vcf.gz"   # 12,239, --pick'd
-VEP_BIG="$ROOT/data/B487_1_V_vs_B487_1_cOM.freebayes.annotated.vcf.gz"     # 92,216, T/N
-VEP_FB="$ROOT/data/B505_V_1/B505_V_1.freebayes_VEP.ann.vcf.gz"             # 34,415, multi-transcript
-SNPEFF="$ROOT/data/variantsNorm3_snpEff_annotated.vcf"                     # 29,589, ANN
-MULTISAMPLE="$ROOT/data/multiSamplesMMMT.normalized.filtered.vcf.gz"
-UNANNOTATED="$ROOT/data/B487_2_LN_vs_B487_1_cOM/B487_2_LN_vs_B487_1_cOM.mutect2.filtered.vcf.gz"
+VEP_SMALL="$ROOT/data/tumor_only/to_mutect2_vep_pick.vcf.gz"               # 12,239, --pick'd
+VEP_BIG="$ROOT/data/tumor_normal/tn_freebayes_vep.vcf.gz"                  # 92,216, T/N
+VEP_FB="$ROOT/data/tumor_only/to_freebayes_vep.vcf.gz"                     # 34,415, multi-transcript
+SNPEFF="$ROOT/data/snpeff/snpeff_3sample.vcf"                              # 29,589, ANN
+MULTISAMPLE="$ROOT/data/cohort/cohort_16sample.vcf.gz"
+UNANNOTATED="$ROOT/data/tumor_normal/tn_mutect2.filtered.vcf.gz"
 
 # --- external tools: bcftools/samtools/tabix live in a micromamba env, vcf2maf is one .pl file
 MM="${MICROMAMBA_BIN:-$HOME/.local/bin/micromamba}"
 ENV_NAME="${VALIDATION_ENV:-vcf-reformatter-validation}"
-VCF2MAF="${VCF2MAF_DIR:-$HOME/tools/vcf2maf}/vcf2maf.pl"
-FASTA="${GENOME_DIR:-$HOME/genomes/GRCh38}/GRCh38.chr.fa"
+# vcf2maf and the reference genome live together under BIOINFO_ROOT; override that to move
+# both at once, or VCF2MAF_DIR/GENOME_DIR to move one. Moved off $HOME on 2026-09-13.
+BIOINFO_ROOT="${BIOINFO_ROOT:-/Volumes/T7/bioinfo}"
+VCF2MAF="${VCF2MAF_DIR:-$BIOINFO_ROOT/vcf2maf}/vcf2maf.pl"
+FASTA="${GENOME_DIR:-$BIOINFO_ROOT/genomes/GRCh38}/GRCh38.chr.fa"
 mm() { "$MM" run -n "$ENV_NAME" "$@"; }
 
 # vcf2maf ground truth for one VCF, cached in $WORK (the 92k file takes ~100s).
@@ -94,9 +97,9 @@ if run maf; then
     HEADER_EXPECTED="$ROOT/tests/scripts/maf_header.expected"
     # <path>:<picked|nopick> — 'first' can only be held to vcf2maf on --pick'd input.
     MAF_FILES=(
-        "$ROOT/data/B505_V_1/B505_1_V.mutect2.filtered_VEP.ann.vcf.gz:picked"
-        "$ROOT/data/B505_V_1/B505_V_1.freebayes_VEP.ann.vcf.gz:nopick"
-        "$ROOT/data/B487_1_V_vs_B487_1_cOM.freebayes.annotated.vcf.gz:nopick"
+        "$VEP_SMALL:picked"
+        "$VEP_FB:nopick"
+        "$VEP_BIG:nopick"
     )
     for entry in "${MAF_FILES[@]}"; do
         vcf="${entry%:*}"; picked="${entry##*:}"
@@ -225,6 +228,37 @@ SPLITPY
 fi
 
 
+if run tsv; then
+    # TSV field extraction against an independent parser: bcftools +split-vep reads both
+    # VEP's CSQ and SnpEff's ANN. This is the 2026-07-29 ad hoc check made permanent.
+    # `first` compares element 0 of bcftools' comma-joined lists against -t first, row by
+    # row; `split` compares bcftools -d (one row per transcript) against -t split as
+    # multisets. Four annotation columns per row: gene, consequence, HGVSc, HGVSp.
+    VEP_PAIRS="CSQ_SYMBOL=SYMBOL,CSQ_Consequence=Consequence,CSQ_HGVSc=HGVSc,CSQ_HGVSp=HGVSp"
+    ANN_PAIRS="ANN_Gene_Name=Gene_Name,ANN_Annotation=Annotation,ANN_HGVS_c=HGVS.c,ANN_HGVS_p=HGVS.p"
+    for src in "vep:$VEP_SMALL:$VEP_PAIRS" "vep:$VEP_FB:$VEP_PAIRS" "vep:$VEP_BIG:$VEP_PAIRS" \
+               "snpeff:$SNPEFF:$ANN_PAIRS"; do
+        IFS=: read -r ann vcf pairs <<< "$src"
+        base="$(basename "${vcf%%.vcf*}")"
+        fmt='%CHROM\t%POS\t%REF\t%ALT'
+        for p in ${pairs//,/ }; do fmt+="\t%${p#*=}"; done; fmt+='\n'
+        for mode in first split; do
+            [[ $mode == split ]] && dflag=-d || dflag=
+            "$BIN" "$vcf" -o "$WORK" -p "tsv_${base}_${mode}" --report none -a "$ann" \
+                -t "$mode" >/dev/null 2>&1
+            mm bcftools +split-vep $dflag -f "$fmt" "$vcf" > "$WORK/tsv_${base}_${mode}.bcf.tsv" \
+                2>/dev/null
+            res="$(python3 "$ROOT/tests/scripts/compare_tsv_bcftools.py" \
+                --ours "$WORK/tsv_${base}_${mode}_reformatted.tsv" \
+                --bcftools "$WORK/tsv_${base}_${mode}.bcf.tsv" \
+                --mode "$mode" --pairs "$pairs" 2>"$WORK/tsv_${base}_${mode}.diff" || true)"
+            rows="${res#rows=}"; rows="${rows%% *}"; diffs="${res##*diffs=}"
+            eq tsv "$base/$mode/annotation_cell_diffs_vs_bcftools" "${diffs:-unmeasured}" 0 \
+                "4 columns x $rows rows; $(head -c 80 "$WORK/tsv_${base}_${mode}.diff" | tr '\n' ' ')"
+        done
+    done
+fi
+
 if run parquet; then
     # Both annotators: the MAF writer and the parquet writer share code, but the ANN path
     # fills different columns, so losslessness has to be shown on both.
@@ -296,6 +330,28 @@ PQPY
             "$(du -m "$text" "$text.gz" "$pqf" | awk '{printf "%s/", $1}' | sed 's:/$::')" \
             INFO "parquet is ZSTD since 2026-08-18"
       done
+    done
+
+    # Since 0.7.6 (issue #6): -c gzips the text next to the parquet, and --parquet-only
+    # skips the text file. Both must yield the very same parquet bytes as plain --parquet.
+    for fmt in maf tsv; do
+      ref="$WORK/pq_vep_${fmt}_reformatted.$fmt.parquet"
+      "$BIN" "$VEP_SMALL" -o "$WORK" -p "pqgz_$fmt" --report none -a vep \
+          --output-format "$fmt" --parquet -c >/dev/null 2>&1
+      eq parquet "vep/$fmt/compress_text_is_gzip" \
+          "$(head -c 2 "$WORK/pqgz_${fmt}_reformatted.$fmt.gz" | od -An -tx1 | tr -d ' ')" 1f8b \
+          "--parquet -c gzips the text file"
+      eq parquet "vep/$fmt/compress_parquet_identical" \
+          "$(cmp -s "$ref" "$WORK/pqgz_${fmt}_reformatted.$fmt.parquet" && echo yes || echo no)" yes \
+          "parquet named without .gz, bytes identical to plain --parquet"
+      "$BIN" "$VEP_SMALL" -o "$WORK" -p "pqonly_$fmt" --report none -a vep \
+          --output-format "$fmt" --parquet-only >/dev/null 2>&1
+      eq parquet "vep/$fmt/only_no_text_file" \
+          "$([[ -e "$WORK/pqonly_${fmt}_reformatted.$fmt" ]] && echo written || echo absent)" absent \
+          "--parquet-only writes no text file"
+      eq parquet "vep/$fmt/only_parquet_identical" \
+          "$(cmp -s "$ref" "$WORK/pqonly_${fmt}_reformatted.$fmt.parquet" && echo yes || echo no)" yes \
+          "bytes identical to plain --parquet"
     done
 
     # Parquet streams too since 2026-09-09 — one row group per chunk, not one per file.

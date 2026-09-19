@@ -141,26 +141,7 @@ pub fn biotype_priority(biotype: &str) -> u8 {
 }
 
 impl MafRecord {
-    /// Convert from ReformattedVcfRecord to MafRecord
-    // ponytail: unused by the binary since sample selection landed; the lib's tests are the callers.
-    #[allow(dead_code)]
-    pub fn from_reformatted_record(
-        record: &ReformattedVcfRecord,
-        center: &str,
-        ncbi_build: &str,
-        sample_barcode: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_reformatted_record_for_samples(
-            record,
-            center,
-            ncbi_build,
-            sample_barcode,
-            None,
-            None,
-        )
-    }
-
-    /// As `from_reformatted_record`, but reading the depth columns from explicitly named
+    /// Convert a single-ALT record to a MAF row, reading the depth columns from explicitly named
     /// samples. `tumor` is the sample the t_* columns describe; `normal` populates the
     /// matched-normal columns. Passing `None` for either keeps the historical behaviour of
     /// using the first sample that declares `DP`.
@@ -368,26 +349,8 @@ impl MafRecord {
         alt.starts_with('<') || alt.contains('[') || alt.contains(']')
     }
 
-    /// Handle multi-allelic variants by creating separate MafRecord for each alternate allele
-    #[allow(dead_code)]
-    pub fn from_reformatted_record_multi(
-        record: &ReformattedVcfRecord,
-        center: &str,
-        ncbi_build: &str,
-        sample_barcode: &str,
-    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
-        Self::from_reformatted_record_multi_for_samples(
-            record,
-            center,
-            ncbi_build,
-            sample_barcode,
-            None,
-            None,
-        )
-    }
-
-    /// As `from_reformatted_record_multi`, with the depth columns read from explicitly
-    /// named tumor and normal samples.
+    /// One MAF row per alternate allele, with the depth columns read from explicitly named
+    /// tumor and normal samples.
     pub fn from_reformatted_record_multi_for_samples(
         record: &ReformattedVcfRecord,
         center: &str,
@@ -1300,7 +1263,10 @@ mod tests {
             format_sample_data: None,
             annotation_field_type: crate::reformat_vcf::AnnotationFieldType::None,
         };
-        MafRecord::from_reformatted_record(&record, "test", "GRCh38", "sample").unwrap()
+        MafRecord::from_reformatted_record_for_samples(
+            &record, "test", "GRCh38", "sample", None, None,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1382,7 +1348,9 @@ mod tests {
         record
             .info_fields
             .insert("CSQ_STRAND".to_string(), "-1".to_string());
-        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        let maf =
+            MafRecord::from_reformatted_record_for_samples(&record, "c", "GRCh38", "s", None, None)
+                .unwrap();
 
         assert_eq!(maf.strand, "+");
     }
@@ -1407,7 +1375,10 @@ mod tests {
     fn test_multiallelic_annotation_stays_on_its_own_allele() {
         // VEP annotated GCCCC only; CCCCC must not inherit its gene and consequence.
         let record = annotated_record(8324505, "CCCCA", "GCCCC,CCCCC", "GCCCC");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(rows.len(), 2, "one row per ALT");
         assert_eq!(rows[0].hugo_symbol, "SLC45A1");
@@ -1419,7 +1390,10 @@ mod tests {
     #[test]
     fn test_multiallelic_annotation_kept_when_it_names_the_second_allele() {
         let record = annotated_record(8324505, "CCCCA", "GCCCC,CCCCC", "CCCCC");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(rows[0].hugo_symbol, "Unknown");
         assert_eq!(rows[1].hugo_symbol, "SLC45A1");
@@ -1429,7 +1403,10 @@ mod tests {
     fn test_multiallelic_matches_vep_minimal_indel_allele() {
         // VEP reports deletions as "-": REF=AT ALT=A is a deletion of T.
         let record = annotated_record(100, "AT", "A,ATT", "-");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(
             rows[0].hugo_symbol, "SLC45A1",
@@ -1443,7 +1420,10 @@ mod tests {
         // Real site: REF=TGGAGGA ALT=T,TGGAGGAGGA — VEP names the insertion allele
         // "GGAGGAGGA", i.e. the ALT with only its anchor base removed.
         let record = annotated_record(73385903, "TGGAGGA", "T,TGGAGGAGGA", "GGAGGAGGA");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(
             rows[0].hugo_symbol, "Unknown",
@@ -1460,7 +1440,10 @@ mod tests {
         record
             .info_fields
             .insert("CSQ_ALLELE_NUM".to_string(), "2".to_string());
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(rows[0].hugo_symbol, "Unknown");
         assert_eq!(rows[1].hugo_symbol, "SLC45A1");
@@ -1470,7 +1453,10 @@ mod tests {
     fn test_single_allele_annotation_is_never_stripped() {
         // Guard: allele filtering must not touch the ordinary one-ALT case.
         let record = annotated_record(100, "A", "G", "does_not_match");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hugo_symbol, "SLC45A1");
@@ -1500,7 +1486,10 @@ mod tests {
             info_fields.insert("CSQ_HGVSp".to_string(), p.to_string());
         }
         let record = create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", info_fields);
-        MafRecord::from_reformatted_record(&record, "test", "GRCh38", "sample").unwrap()
+        MafRecord::from_reformatted_record_for_samples(
+            &record, "test", "GRCh38", "sample", None, None,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1668,7 +1657,9 @@ mod tests {
         // vcf2maf.pl:913-921 — Tumor_Seq_Allele1 is the first GT allele that isn't the variant,
         // so a 1/1 call reports the ALT twice rather than pretending the site is heterozygous.
         let record = record_with_genotype("T", "C", "1/1");
-        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        let maf =
+            MafRecord::from_reformatted_record_for_samples(&record, "c", "GRCh38", "s", None, None)
+                .unwrap();
 
         assert_eq!(maf.reference_allele, "T");
         assert_eq!(maf.tumor_seq_allele1, "C");
@@ -1678,7 +1669,9 @@ mod tests {
     #[test]
     fn test_tumor_seq_allele1_hom_alt_deletion_uses_the_dash_form() {
         let record = record_with_genotype("ATCG", "A", "1|1");
-        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        let maf =
+            MafRecord::from_reformatted_record_for_samples(&record, "c", "GRCh38", "s", None, None)
+                .unwrap();
 
         assert_eq!(maf.reference_allele, "TCG");
         assert_eq!(maf.tumor_seq_allele1, "-");
@@ -1689,7 +1682,10 @@ mod tests {
         // Guard: only hom-alt changes. vcf2maf assumes ref/var het when GT is absent or "./.".
         for gt in ["0/1", "0|1", "./.", "."] {
             let record = record_with_genotype("T", "C", gt);
-            let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+            let maf = MafRecord::from_reformatted_record_for_samples(
+                &record, "c", "GRCh38", "s", None, None,
+            )
+            .unwrap();
             assert_eq!(maf.tumor_seq_allele1, "T", "GT was {gt}");
         }
         let maf = maf_from(100, "T", "C");
@@ -1701,7 +1697,10 @@ mod tests {
         // Real site: chr1:240207640 REF=CT ALT=TC,CC GT=1/2. vcf2maf.pl:921 takes the first GT
         // allele that isn't this row's variant, so the TC row reports CC and vice versa.
         let record = record_with_genotype("CT", "TC,CC", "1/2");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(rows[0].tumor_seq_allele2, "TC");
         assert_eq!(rows[0].tumor_seq_allele1, "CC");
@@ -1713,7 +1712,10 @@ mod tests {
     #[test]
     fn test_multiallelic_genotype_with_reference_allele_reports_reference() {
         let record = record_with_genotype("CT", "TC,CC", "0/2");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(rows[1].tumor_seq_allele2, "C");
         assert_eq!(
@@ -1727,7 +1729,10 @@ mod tests {
         // REF=TGGAGGA ALT=T,TGGAGGAGGA GT=1/2: for the insertion row the trim eats 7 bases, more
         // than the sibling deletion allele has, and vcf2maf's substr loop leaves it as "-".
         let record = record_with_genotype("TGGAGGA", "T,TGGAGGAGGA", "1/2");
-        let rows = MafRecord::from_reformatted_record_multi(&record, "c", "GRCh38", "s").unwrap();
+        let rows = MafRecord::from_reformatted_record_multi_for_samples(
+            &record, "c", "GRCh38", "s", None, None,
+        )
+        .unwrap();
 
         assert_eq!(rows[1].tumor_seq_allele2, "GGA", "insertion row");
         assert_eq!(rows[1].tumor_seq_allele1, "-");
@@ -1754,7 +1759,9 @@ mod tests {
             }],
         });
 
-        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        let maf =
+            MafRecord::from_reformatted_record_for_samples(&record, "c", "GRCh38", "s", None, None)
+                .unwrap();
         assert_eq!(maf.t_depth, Some(90));
         assert_eq!(maf.t_ref_count, Some(60));
         assert_eq!(maf.t_alt_count, Some(30));
@@ -1767,7 +1774,9 @@ mod tests {
             .info_fields
             .insert("INFO_DP".to_string(), "100".to_string());
 
-        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        let maf =
+            MafRecord::from_reformatted_record_for_samples(&record, "c", "GRCh38", "s", None, None)
+                .unwrap();
         assert_eq!(maf.t_depth, Some(100));
     }
 
@@ -2084,12 +2093,14 @@ mod tests {
     fn without_a_named_tumor_the_first_sample_is_still_used() {
         // Existing single-sample behaviour must not change; only naming a sample changes it.
         let record = tumor_normal_record();
-        let maf = MafRecord::from_reformatted_record(&record, "c", "GRCh38", "s").unwrap();
+        let maf =
+            MafRecord::from_reformatted_record_for_samples(&record, "c", "GRCh38", "s", None, None)
+                .unwrap();
         assert_eq!(maf.t_depth, Some(1));
     }
 
-    // Local equivalent of tests/test.rs's `create_test_maf_record` helper — that helper lives
-    // in the integration-test crate and isn't reachable from this unit-test module.
+    // Same shape as `tests/common::record`; that helper lives in the integration-test crates
+    // and isn't reachable from here.
     fn create_test_maf_record(
         chromosome: &str,
         position: u64,
@@ -2176,8 +2187,15 @@ mod tests {
     fn test_to_tsv_line_leaves_unsupported_columns_empty() {
         let record =
             create_test_maf_record("chr1", 100, "A", "G", Some(60.0), "PASS", HashMap::new());
-        let maf = MafRecord::from_reformatted_record(&record, "TestCenter", "GRCh38", "SAMPLE-001")
-            .unwrap();
+        let maf = MafRecord::from_reformatted_record_for_samples(
+            &record,
+            "TestCenter",
+            "GRCh38",
+            "SAMPLE-001",
+            None,
+            None,
+        )
+        .unwrap();
         let tsv = maf.to_tsv_line();
         let fields: Vec<&str> = tsv.split('\t').collect();
         assert_eq!(fields.len(), 50);
@@ -2206,9 +2224,11 @@ mod tests {
             format_sample_data: None,
             annotation_field_type: crate::reformat_vcf::AnnotationFieldType::None,
         };
-        MafRecord::from_reformatted_record(&record, "test", "GRCh38", "sample")
-            .unwrap()
-            .dbsnp_rs
+        MafRecord::from_reformatted_record_for_samples(
+            &record, "test", "GRCh38", "sample", None, None,
+        )
+        .unwrap()
+        .dbsnp_rs
     }
 
     #[test]
