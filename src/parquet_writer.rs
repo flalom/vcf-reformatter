@@ -79,21 +79,6 @@ fn new_writer(path: &str, schema: Arc<Schema>) -> Result<ArrowWriter<std::fs::Fi
     Ok(ArrowWriter::try_new(file, schema, Some(props))?)
 }
 
-// One-shot wrappers: unused by the binary, which streams through ParquetSink, but they
-// are the library API the integration tests use.
-#[allow(dead_code)]
-/// Write ReformattedVcfRecords to a parquet file in one go.
-/// Numeric columns (POS, QUAL) use native types; all others are strings.
-pub fn write_tsv_as_parquet(
-    path: &str,
-    headers: &[String],
-    records: &[ReformattedVcfRecord],
-) -> Result<(), BoxErr> {
-    let mut sink = ParquetSink::create_tsv(path, headers)?;
-    sink.write_tsv(records)?;
-    sink.close()
-}
-
 fn build_tsv_schema(headers: &[String]) -> Schema {
     let fields: Vec<Field> = headers
         .iter()
@@ -172,15 +157,6 @@ fn get_tsv_string_value<'a>(record: &'a ReformattedVcfRecord, header: &str) -> C
             }
         },
     }
-}
-
-#[allow(dead_code)]
-/// Write MafRecords to a parquet file in one go.
-/// Numeric columns use native types; all others are strings.
-pub fn write_maf_as_parquet(path: &str, records: &[MafRecord]) -> Result<(), BoxErr> {
-    let mut sink = ParquetSink::create_maf(path)?;
-    sink.write_maf(records)?;
-    sink.close()
 }
 
 fn build_maf_schema() -> Schema {

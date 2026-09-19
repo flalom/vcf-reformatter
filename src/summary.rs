@@ -138,20 +138,6 @@ pub fn count_multi_transcript_sites(data_lines: &[String]) -> usize {
         .count()
 }
 
-/// Count variants per chromosome from raw VCF data lines.
-/// Each line starts with the chromosome name followed by a tab.
-// Superseded by the streaming path; kept because tests/test.rs still exercises it.
-#[allow(dead_code)]
-pub fn count_input_chromosomes(data_lines: &[String]) -> IndexMap<String, usize> {
-    let mut counts = IndexMap::new();
-    for line in data_lines {
-        if let Some(chrom) = line.split('\t').next() {
-            *counts.entry(chrom.to_string()).or_insert(0) += 1;
-        }
-    }
-    sort_chromosomes(counts)
-}
-
 /// Sort chromosome keys in natural order: 1-22, X, Y, M/MT, then others alphabetically.
 pub fn sort_chromosomes(counts: IndexMap<String, usize>) -> IndexMap<String, usize> {
     sort_by_chromosome(counts.into_iter().collect())
@@ -467,19 +453,6 @@ mod tests {
     }
 
     #[test]
-    fn test_count_input_chromosomes() {
-        let lines = vec![
-            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
-            "chr1\t200\t.\tC\tT\t40\tPASS\tDP=30".to_string(),
-            "chr2\t300\t.\tG\tA\t50\tPASS\tDP=20".to_string(),
-        ];
-        let counts = count_input_chromosomes(&lines);
-        assert_eq!(counts.get("chr1"), Some(&2));
-        assert_eq!(counts.get("chr2"), Some(&1));
-        assert_eq!(counts.len(), 2);
-    }
-
-    #[test]
     fn test_chromosome_sort_order() {
         let mut counts = IndexMap::new();
         counts.insert("chrX".to_string(), 10);
@@ -506,19 +479,6 @@ mod tests {
         let sorted = sort_chromosomes(counts);
         let keys: Vec<&String> = sorted.keys().collect();
         assert_eq!(keys, vec!["1", "2", "10", "X", "Y"]);
-    }
-
-    #[test]
-    fn test_summary_counts_sum_to_total() {
-        let lines = vec![
-            "chr1\t100\t.\tA\tG\t60\tPASS\tDP=50".to_string(),
-            "chr1\t200\t.\tC\tT\t40\tPASS\tDP=30".to_string(),
-            "chr2\t300\t.\tG\tA\t50\tPASS\tDP=20".to_string(),
-            "chr3\t400\t.\tT\tC\t70\tPASS\tDP=40".to_string(),
-        ];
-        let counts = count_input_chromosomes(&lines);
-        let total: usize = counts.values().sum();
-        assert_eq!(total, lines.len());
     }
 
     #[test]

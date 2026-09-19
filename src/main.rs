@@ -195,8 +195,13 @@ struct Cli {
     report_dir: Option<String>,
 
     /// Also write an Apache Parquet copy of the output, alongside the text file
+    /// (combine with -c to gzip the text file)
     #[arg(long)]
     parquet: bool,
+
+    /// Write only the Parquet file, no text output (implies --parquet)
+    #[arg(long, conflicts_with = "compress")]
+    parquet_only: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -461,15 +466,8 @@ fn annotation_format(header: &str) -> Option<(&'static str, usize)> {
 }
 
 fn main() {
-    let cli = Cli::parse();
-
-    // Validate --parquet + --compress conflict
-    if cli.parquet && cli.compress {
-        eprintln!(
-            "Error: Parquet has built-in compression; --compress is not needed with --parquet"
-        );
-        std::process::exit(1);
-    }
+    let mut cli = Cli::parse();
+    cli.parquet |= cli.parquet_only;
 
     #[cfg(not(feature = "parquet_out"))]
     if cli.parquet {
@@ -568,20 +566,24 @@ fn main() {
             println!("🔄 Processing VCF data...");
             let process_start = Instant::now();
 
-            let output_file = match File::create(&reformatted_file) {
-                Ok(file) => file,
-                Err(e) => {
-                    eprintln!("❌ Error creating output file: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let mut writer: Box<dyn Write> = if cli.compress {
-                Box::new(BufWriter::new(GzEncoder::new(
-                    output_file,
-                    Compression::default(),
-                )))
+            let mut writer: Box<dyn Write> = if cli.parquet_only {
+                Box::new(std::io::sink())
             } else {
-                Box::new(BufWriter::new(output_file))
+                let output_file = match File::create(&reformatted_file) {
+                    Ok(file) => file,
+                    Err(e) => {
+                        eprintln!("❌ Error creating output file: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                if cli.compress {
+                    Box::new(BufWriter::new(GzEncoder::new(
+                        output_file,
+                        Compression::default(),
+                    )))
+                } else {
+                    Box::new(BufWriter::new(output_file))
+                }
             };
 
             if cli.verbose {
@@ -609,7 +611,7 @@ fn main() {
             // Parquet is written a chunk at a time too; the sink opens once the first
             // chunk has settled the column list.
             #[cfg(feature = "parquet_out")]
-            let parquet_file = format!("{reformatted_file}.parquet");
+            let parquet_file = format!("{}.parquet", reformatted_file.trim_end_matches(".gz"));
             #[cfg(feature = "parquet_out")]
             let mut parquet_sink: Option<parquet_writer::ParquetSink> = None;
 
@@ -793,8 +795,7 @@ fn main() {
             println!();
 
             // The text file's own name plus .parquet, so both output formats read
-            // X_reformatted.<tsv|maf>.parquet. --parquet and --compress are mutually
-            // exclusive (checked at startup), so there is no .gz case.
+            // X_reformatted.<tsv|maf>.parquet (a -c .gz suffix is dropped first).
             #[cfg(feature = "parquet_out")]
             if let Some(sink) = parquet_sink.take() {
                 match sink.close() {
@@ -818,11 +819,13 @@ fn main() {
             );
 
             let total_time = total_start.elapsed();
-            println!(
-                "✅ Output file ready: {}{}",
-                reformatted_file,
-                if cli.compress { " (compressed)" } else { "" }
-            );
+            if !cli.parquet_only {
+                println!(
+                    "✅ Output file ready: {}{}",
+                    reformatted_file,
+                    if cli.compress { " (compressed)" } else { "" }
+                );
+            }
             println!();
 
             let timing = ProcessingTiming {
@@ -853,11 +856,15 @@ fn main() {
             let maf_output_file = generate_maf_output_filename(&cli);
             let process_start = Instant::now();
 
-            let mut writer = match reformat_vcf::MafWriter::create(&maf_output_file, cli.compress) {
-                Ok(writer) => writer,
-                Err(e) => {
-                    eprintln!("❌ Error writing MAF file: {e}");
-                    std::process::exit(1);
+            let mut writer = if cli.parquet_only {
+                reformat_vcf::MafWriter::sink()
+            } else {
+                match reformat_vcf::MafWriter::create(&maf_output_file, cli.compress) {
+                    Ok(writer) => writer,
+                    Err(e) => {
+                        eprintln!("❌ Error writing MAF file: {e}");
+                        std::process::exit(1);
+                    }
                 }
             };
 
@@ -874,7 +881,7 @@ fn main() {
             let ann_format = annotation_format(&header);
             let mut progress_marks = 0usize;
             #[cfg(feature = "parquet_out")]
-            let parquet_file = format!("{maf_output_file}.parquet");
+            let parquet_file = format!("{}.parquet", maf_output_file.trim_end_matches(".gz"));
             #[cfg(feature = "parquet_out")]
             let mut parquet_sink = if cli.parquet {
                 match parquet_writer::ParquetSink::create_maf(&parquet_file) {
@@ -1025,10 +1032,12 @@ fn main() {
             );
 
             let total_time = total_start.elapsed();
-            println!(
-                "✅ MAF file written{}",
-                if cli.compress { " (compressed)" } else { "" }
-            );
+            if !cli.parquet_only {
+                println!(
+                    "✅ MAF file written{}",
+                    if cli.compress { " (compressed)" } else { "" }
+                );
+            }
             println!();
 
             let timing = ProcessingTiming {
